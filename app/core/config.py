@@ -113,6 +113,41 @@ class Settings(BaseSettings):
     tenant_db_pool_size: int = Field(3, ge=1, le=20)
     tenant_db_idle_dispose_s: int = Field(900, ge=60)
 
+    # --- Background work (Celery) -----------------------------------------------------------------
+    celery_broker_url: SecretStr = SecretStr("redis://localhost:6379/1")
+    celery_task_soft_time_limit_s: int = Field(300, ge=10)
+    celery_task_time_limit_s: int = Field(360, ge=15)
+    celery_max_retries: int = Field(5, ge=0, le=20)
+    outbox_batch_size: int = Field(200, ge=1, le=5000)
+    webhook_max_attempts: int = Field(10, ge=1, le=30)
+    webhook_disable_after_failures: int = Field(50, ge=1)
+    webhook_allowed_ports: list[int] = Field(default_factory=lambda: [443])
+    notification_max_attempts: int = Field(5, ge=1, le=20)
+    delivery_lease_s: int = Field(300, ge=30)
+
+    # --- Imports & files -------------------------------------------------------------------------
+    import_max_bytes: int = Field(10 * 1024 * 1024, ge=1024)
+    import_max_rows: int = Field(50_000, ge=1)
+    import_max_uncompressed_bytes: int = Field(100 * 1024 * 1024, ge=1024)
+    file_retention_days: int = Field(7, ge=1)
+    ping_retention_days: int = Field(90, ge=1)
+
+    # --- Push notifications (FCM HTTP v1, platform-level service account) -----------------------
+    fcm_service_account_json: SecretStr | None = None
+    fcm_project_id: str | None = None
+
+    # --- Offboarding / cold storage ----------------------------------------------------------------
+    archive_store: Literal["local", "s3"] = "local"
+    archive_dir: str = "./archives"
+    archive_s3_bucket: str | None = None
+    archive_s3_prefix: str = "tenant-archives/"
+    archive_s3_kms_key_id: str | None = None
+
+    # --- Observability ---------------------------------------------------------------------------
+    otel_enabled: bool = False
+    otel_exporter_endpoint: str = "http://localhost:4318"
+    otel_sample_ratio: float = Field(0.1, ge=0.0, le=1.0)
+
     # --- Analytics -------------------------------------------------------------------------------
     analytics_statement_timeout_ms: int = Field(3000, ge=100, le=60_000)
     analytics_max_days: int = Field(366, ge=1, le=3660)

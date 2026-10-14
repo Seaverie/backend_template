@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import ipaddress
 import socket
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -40,7 +41,8 @@ class OutboundError(Exception):
 
 @dataclass(frozen=True, slots=True)
 class OutboundPolicy:
-    allowed_hosts: frozenset[str]
+    # None = any host (tenant-configured webhooks); every resolved address must still be public.
+    allowed_hosts: frozenset[str] | None
     allowed_ports: frozenset[int] = field(default_factory=lambda: frozenset({443}))
 
 
@@ -90,6 +92,30 @@ class SafeHttpClient:
             trust_env=False,  # never route through env-configured proxies implicitly
         )
 
+    async def validate_destination(self, url: str, *, policy: OutboundPolicy) -> None:
+        """Run every pre-send check (scheme, host, port, DNS) without sending anything."""
+        await self._check(httpx.URL(url), policy)
+
+    async def _check(self, u: httpx.URL, policy: OutboundPolicy) -> list[str]:
+        host = (u.host or "").lower()
+        port = u.port or 443
+        if u.scheme != "https":
+            raise OutboundBlocked("only https is allowed")
+        if u.userinfo:
+            raise OutboundBlocked("credentials in URL are not allowed")
+        if not host or (policy.allowed_hosts is not None and host not in policy.allowed_hosts):
+            raise OutboundBlocked("host is not allowlisted for this integration")
+        if port not in policy.allowed_ports:
+            raise OutboundBlocked("port is not allowed")
+        try:
+            addresses = await self._resolver(host, port)
+        except OSError as e:
+            raise OutboundError("DNS resolution failed") from e
+        if not addresses or not all(is_public_address(a) for a in addresses):
+            log.warning("outbound.blocked_address", host=host)
+            raise OutboundBlocked("host resolves to a non-public address")
+        return addresses
+
     async def request(
         self,
         method: str,
@@ -105,21 +131,7 @@ class SafeHttpClient:
         u = httpx.URL(url)
         host = (u.host or "").lower()
         port = u.port or 443
-        if u.scheme != "https":
-            raise OutboundBlocked("only https is allowed")
-        if u.userinfo:
-            raise OutboundBlocked("credentials in URL are not allowed")
-        if host not in policy.allowed_hosts:
-            raise OutboundBlocked("host is not allowlisted for this integration")
-        if port not in policy.allowed_ports:
-            raise OutboundBlocked("port is not allowed")
-        try:
-            addresses = await self._resolver(host, port)
-        except OSError as e:
-            raise OutboundError("DNS resolution failed") from e
-        if not addresses or not all(is_public_address(a) for a in addresses):
-            log.warning("outbound.blocked_address", host=host)
-            raise OutboundBlocked("host resolves to a non-public address")
+        addresses = await self._check(u, policy)
 
         pinned = u.copy_with(host=addresses[0])
         req_headers = {**(headers or {}), "Host": host if port == 443 else f"{host}:{port}"}
@@ -133,6 +145,7 @@ class SafeHttpClient:
             content=content,
             extensions={"sni_hostname": host},
         )
+        started = time.perf_counter()
         try:
             resp = await self._client.send(req, stream=True)
         except httpx.HTTPError as e:
@@ -145,6 +158,12 @@ class SafeHttpClient:
                     raise OutboundError("response too large")
         finally:
             await resp.aclose()
+        from app.observability import OUTBOUND_LATENCY
+
+        # Provider hosts are a fixed set; tenant-supplied webhook hosts are not, so they share one label
+        # (keeps metric cardinality bounded and avoids exporting customer endpoints as label values).
+        label = host if policy.allowed_hosts is not None else "tenant_endpoint"
+        OUTBOUND_LATENCY.record(time.perf_counter() - started, {"host": label, "status": resp.status_code})
         if 300 <= resp.status_code < 400:
             raise OutboundError("redirects are not followed")
         return SafeResponse(resp.status_code, dict(resp.headers), bytes(body))

@@ -32,6 +32,7 @@ from app.models import (
 )
 from app.services.audit import AuditContext, record
 from app.services.authz import Principal
+from app.services.outbox import emit
 from app.services.providers import ProviderService
 
 log = get_logger("payments")
@@ -120,6 +121,17 @@ class PaymentService:
             await s.execute(select(AppOrder).where(AppOrder.id == pay.order_id).with_for_update())
         ).scalar_one()
         order.amount_paid = min(order.total, order.amount_paid + pay.amount)
+        await emit(
+            s,
+            pay.tenant_id,
+            "payment.succeeded",
+            {
+                "payment_id": pay.id,
+                "order_id": pay.order_id,
+                "amount": pay.amount,
+                "currency": pay.currency,
+            },
+        )
         return True
 
     async def handle_webhook(
@@ -178,6 +190,12 @@ class PaymentService:
                     elif event.payment_status == "failed" and pay.status == PaymentStatus.pending:
                         pay.status = PaymentStatus.failed
                         applied = True
+                        await emit(
+                            s,
+                            pay.tenant_id,
+                            "payment.failed",
+                            {"payment_id": pay.id, "order_id": pay.order_id},
+                        )
                     elif event.payment_status == "refunded" and event.amount_refunded_minor is not None:
                         total_refunded = from_minor(event.amount_refunded_minor, pay.currency)
                         applied = await self._apply_refund_total(s, pay, total_refunded)
@@ -207,6 +225,17 @@ class PaymentService:
             await s.execute(select(AppOrder).where(AppOrder.id == pay.order_id).with_for_update())
         ).scalar_one()
         order.amount_refunded = min(order.amount_paid, order.amount_refunded + delta)
+        await emit(
+            s,
+            pay.tenant_id,
+            "payment.refunded",
+            {
+                "payment_id": pay.id,
+                "order_id": pay.order_id,
+                "amount_refunded": total_refunded,
+                "currency": pay.currency,
+            },
+        )
         return True
 
     async def refund_order(

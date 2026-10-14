@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from typing import Any
 
 from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 from app.api.deps import (
     client_ip,
@@ -20,10 +21,11 @@ from app.api.deps import (
 from app.api.serialize import pick
 from app.container import Container
 from app.core.errors import NotFound, ValidationFailed
-from app.core.logging import request_id_var
+from app.core.logging import redact_value, request_id_var
 from app.dynamic.schema import TablePatch, TableSpec
-from app.models import AppTenant, DbDialect, DbSslMode, TenantStatus
+from app.models import AppTenant, DbDialect, DbSslMode, SystemDeadLetter, SystemTask, TenantStatus
 from app.security.tokens import TokenClaims
+from app.services.audit import record
 from app.services.authz import PlatformPrincipal
 from app.services.tenant_db import DbConfigIn
 
@@ -325,3 +327,178 @@ async def disable_tenant_db(
     c: Container = Depends(container),
 ) -> None:
     await c.tenant_db.disable(admin.admin_id, tenant_id, platform_audit_ctx(request, admin))
+
+
+# -- offboarding, background tasks, dead letters, diagnostics -------------------------------------------
+
+
+class OffboardIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    confirm_slug: str = Field(..., max_length=63)
+    drop_dedicated_data: bool = False
+
+
+def _task_out(t: Any) -> dict[str, Any]:
+    return pick(
+        t,
+        "id",
+        "kind",
+        "status",
+        "input",
+        "progress",
+        "result",
+        "error",
+        "attempts",
+        "created_at",
+        "started_at",
+        "finished_at",
+    )
+
+
+@router.post("/platform/tenants/{tenant_id}/offboard", status_code=202)
+async def offboard_tenant(
+    tenant_id: uuid.UUID,
+    body: OffboardIn,
+    request: Request,
+    admin: PlatformPrincipal = Depends(platform_admin),
+    c: Container = Depends(container),
+) -> dict[str, Any]:
+    """Irreversibly erase a tenant (after archiving its audit trail). Runs as a background task."""
+    task = await c.offboarding.request(
+        admin.admin_id,
+        tenant_id,
+        confirm_slug=body.confirm_slug,
+        drop_dedicated_data=body.drop_dedicated_data,
+        ctx=platform_audit_ctx(request, admin),
+    )
+    from app.workers.tasks import enqueue
+
+    await asyncio.to_thread(enqueue, "offboard", None, task.id)
+    return _task_out(task)
+
+
+@router.get("/platform/tasks/{task_id}")
+async def platform_task(
+    task_id: uuid.UUID, admin: PlatformPrincipal = Depends(platform_admin), c: Container = Depends(container)
+) -> dict[str, Any]:
+    async with c.db.platform_session(admin.admin_id) as s:
+        task = (await s.execute(select(SystemTask).where(SystemTask.id == task_id))).scalar_one_or_none()
+    if task is None:
+        raise NotFound()
+    return _task_out(task)
+
+
+@router.get("/platform/dead-letters")
+async def dead_letters(
+    limit: int = Query(100, ge=1, le=500),
+    include_requeued: bool = False,
+    admin: PlatformPrincipal = Depends(platform_admin),
+    c: Container = Depends(container),
+) -> dict[str, Any]:
+    stmt = select(SystemDeadLetter).order_by(SystemDeadLetter.created_at.desc()).limit(limit)
+    if not include_requeued:
+        stmt = stmt.where(SystemDeadLetter.requeued_at.is_(None))
+    async with c.db.platform_session(admin.admin_id) as s:
+        rows = (await s.execute(stmt)).scalars().all()
+    return {
+        "items": [
+            pick(
+                d,
+                "id",
+                "tenant_id",
+                "source",
+                "reference_id",
+                "task_name",
+                "error",
+                "created_at",
+                "requeued_at",
+            )
+            for d in rows
+        ]
+    }
+
+
+@router.post("/platform/dead-letters/{dead_letter_id}/requeue", status_code=202)
+async def requeue(
+    dead_letter_id: uuid.UUID,
+    request: Request,
+    admin: PlatformPrincipal = Depends(platform_admin),
+    c: Container = Depends(container),
+) -> dict[str, Any]:
+    from app.workers import jobs
+    from app.workers.tasks import enqueue
+
+    dl = await jobs.requeue_dead_letter(c, dead_letter_id)
+    if dl.source == "task":
+        async with c.db.platform_session(admin.admin_id) as s:
+            task = (
+                await s.execute(select(SystemTask).where(SystemTask.id == uuid.UUID(dl.reference_id)))
+            ).scalar_one_or_none()
+        if task is not None:
+            await asyncio.to_thread(enqueue, task.kind, task.tenant_id, task.id)
+    async with c.db.platform_session(admin.admin_id) as s:
+        await record(
+            s,
+            platform_audit_ctx(request, admin),
+            tenant_id=None,
+            action="dead_letter.requeue",
+            resource="dead_letters",
+            resource_id=str(dead_letter_id),
+        )
+        await s.commit()
+    return {"requeued": True}
+
+
+@router.get("/platform/diagnostics/slow-queries")
+async def slow_queries(
+    limit: int = Query(20, ge=1, le=100),
+    _: PlatformPrincipal = Depends(platform_admin),
+    c: Container = Depends(container),
+) -> dict[str, Any]:
+    """Query-plan diagnostics from PostgreSQL statistics, never from live data.
+
+    * ``pg_stat_statements``: normalised statements (constants replaced by ``$n``) ranked by mean time.
+      Needs the extension, plus ``pg_read_all_stats`` for the runtime role to see other roles' queries.
+    * ``pg_stat_user_tables``: tables where sequential scans dominate, which usually means a missing
+      index.
+    """
+    out: dict[str, Any] = {"pg_stat_statements": None}
+    async with c.db.anonymous_session() as s:
+        has_ext = (
+            await s.execute(text("SELECT 1 FROM pg_extension WHERE extname = 'pg_stat_statements'"))
+        ).first()
+        if has_ext:
+            rows = (
+                await s.execute(
+                    text(
+                        "SELECT query, calls, mean_exec_time, total_exec_time, rows FROM pg_stat_statements "
+                        "WHERE dbid = (SELECT oid FROM pg_database WHERE datname = current_database()) "
+                        "ORDER BY mean_exec_time DESC LIMIT :n"
+                    ),
+                    {"n": limit},
+                )
+            ).all()
+            out["pg_stat_statements"] = [
+                {
+                    "query": redact_value(r.query[:2000]),
+                    "calls": r.calls,
+                    "mean_ms": round(r.mean_exec_time, 2),
+                    "total_ms": round(r.total_exec_time, 2),
+                    "rows": r.rows,
+                }
+                for r in rows
+            ]
+        tables = (
+            await s.execute(
+                text(
+                    "SELECT schemaname, relname, seq_scan, seq_tup_read, idx_scan, n_live_tup"
+                    " FROM pg_stat_user_tables "
+                    "WHERE seq_scan > coalesce(idx_scan, 0) AND n_live_tup > 1000 "
+                    "ORDER BY seq_tup_read DESC LIMIT :n"
+                ),
+                {"n": limit},
+            )
+        ).all()
+    out["seq_scan_heavy_tables"] = [dict(r._mapping) for r in tables]
+    out["slow_query_log_threshold_ms"] = c.settings.slow_query_ms
+    return out

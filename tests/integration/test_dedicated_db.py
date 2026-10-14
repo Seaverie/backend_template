@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
+from pathlib import Path
 
 import asyncpg
 import pytest
@@ -16,6 +17,7 @@ from httpx import AsyncClient
 
 from app.container import Container
 from app.core.config import get_settings
+from app.services.audit import AuditContext
 from tests.integration.conftest import P, TenantCtx, auth, make_client
 
 ADMIN_URL = os.environ.get("TC_TEST_ADMIN_URL", "postgresql://postgres:postgres@127.0.0.1:5432/postgres")
@@ -194,3 +196,58 @@ async def test_dedicated_routing_end_to_end(
     assert (await ac.post(f"{url}/disable", headers=h)).status_code == 204
     assert (await ac.get(f"{P}/data/{table}", headers=t.h)).status_code == 503
     assert (await ac.get(f"{P}/data/{table}", headers=shared.h)).status_code == 200
+
+
+async def test_offboarding_dedicated_tenant_archives_and_drops_its_objects(
+    ded_client: tuple[AsyncClient, Container],
+    dedicated: dict[str, str],
+    platform_token: str,
+    new_tenant: NewTenant,
+    new_table: NewTable,
+    tmp_path: Path,
+) -> None:
+    from app.services.offboarding import LocalArchiveStore
+
+    ac, c = ded_client
+    c.offboarding.store = LocalArchiveStore(str(tmp_path), c.envelope)
+    h = auth(platform_token)
+    table = await new_table([{"name": "title", "type": "string"}])
+    t = await new_tenant()
+    assert (
+        await ac.put(f"{P}/platform/tenants/{t.id}/database", headers=h, json=cfg(dedicated))
+    ).status_code == 200
+    assert (await ac.post(f"{P}/platform/tenants/{t.id}/database/sync", headers=h)).status_code == 200
+    assert (await ac.post(f"{P}/data/{table}", headers=t.h, json={"title": "x"})).status_code == 201
+
+    task = await c.offboarding.request(
+        uuid.uuid4(),
+        uuid.UUID(t.id),
+        confirm_slug=t.slug,
+        drop_dedicated_data=True,
+        ctx=AuditContext("system", None, None, None),
+    )
+    assert (await c.offboarding.run(task.id)).value == "succeeded"
+
+    ded = await _admin(dedicated["db"])
+    cp = await _admin("tenantcore")
+    try:
+        # TenantCore's objects are gone from the customer's database; the database itself remains.
+        assert await ded.fetchval("SELECT to_regnamespace('tenant_data')") is None
+        assert await ded.fetchval("SELECT to_regclass('public.system_audit_logs')") is None
+        kinds = {
+            r["kind"]: r["records"]
+            for r in await cp.fetch(
+                "SELECT kind, records FROM tenant_archives WHERE tenant_id = $1", uuid.UUID(t.id)
+            )
+        }
+        assert kinds["dedicated_audit_logs"] >= 1 and "audit_logs" in kinds
+        assert (
+            await cp.fetchval(
+                "SELECT count(*) FROM app_tenant_databases WHERE tenant_id = $1", uuid.UUID(t.id)
+            )
+            == 0
+        )
+    finally:
+        await ded.close()
+        await cp.close()
+    assert (await ac.get(f"{P}/data/{table}", headers=t.h)).status_code == 401

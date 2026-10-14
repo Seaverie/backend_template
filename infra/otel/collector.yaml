@@ -1,0 +1,42 @@
+# OpenTelemetry Collector: receives OTLP/HTTP from the API and workers, sends traces to Jaeger and
+# exposes metrics for Prometheus. Development defaults; in production point exporters at your backends
+# and enable TLS on every hop.
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 400
+    spike_limit_mib: 100
+  batch: {}
+  # Defence in depth: the app never records these, but drop them if a future instrumentation does.
+  attributes/scrub:
+    actions:
+      - {key: http.request.header.authorization, action: delete}
+      - {key: http.request.header.x-api-key, action: delete}
+      - {key: http.request.header.cookie, action: delete}
+      - {key: db.statement.parameters, action: delete}
+
+exporters:
+  otlp/jaeger:
+    endpoint: jaeger:4317
+    tls:
+      insecure: true  # in-cluster dev only
+  prometheus:
+    endpoint: 0.0.0.0:8889
+    namespace: tenantcore
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, attributes/scrub, batch]
+      exporters: [otlp/jaeger]
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [prometheus]

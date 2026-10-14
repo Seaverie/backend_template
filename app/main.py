@@ -7,6 +7,7 @@ from fastapi import FastAPI
 
 from app.api.routers import (
     api_keys,
+    async_ops,
     auth,
     catalog,
     commerce,
@@ -21,6 +22,7 @@ from app.core.config import Settings, get_settings
 from app.core.errors import install_error_handlers
 from app.core.logging import configure_logging, get_logger
 from app.middleware.request import RequestContextMiddleware
+from app.observability import instrument
 
 log = get_logger("app")
 
@@ -32,6 +34,7 @@ def create_app(settings: Settings | None = None, container: Container | None = N
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.container = container or Container.build(settings)
+        instrument(settings, app.state.container, app=app)
         log.info("app.startup", environment=settings.environment, api_prefix=settings.api_prefix)
         try:
             yield
@@ -51,7 +54,11 @@ def create_app(settings: Settings | None = None, container: Container | None = N
         openapi_url=f"{settings.api_prefix}/openapi.json" if docs else None,
     )
     install_error_handlers(app)
-    app.add_middleware(RequestContextMiddleware, max_body_bytes=settings.max_request_bytes)
+    app.add_middleware(
+        RequestContextMiddleware,
+        max_body_bytes=settings.max_request_bytes,
+        path_limits={f"{settings.api_prefix}/import/": settings.import_max_bytes + 65_536},
+    )
 
     app.include_router(health.router)
     for r in (
@@ -62,6 +69,7 @@ def create_app(settings: Settings | None = None, container: Container | None = N
         catalog.router,
         commerce.router,
         integrations.router,
+        async_ops.router,
     ):
         app.include_router(r, prefix=settings.api_prefix)
     if settings.enable_platform_routes:

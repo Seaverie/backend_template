@@ -4,7 +4,10 @@
 
 ```
 LB / API gateway (TLS)  ->  API pods (uvicorn, stateless)  ->  PgBouncer (transaction mode)  ->  PostgreSQL 16
-                                                           ->  Redis (Sentinel or managed)
+                                                           ->  Redis (Sentinel or managed): cache + broker
+Celery workers (N)  ----------------------------------------^
+Celery beat (exactly 1)
+API + workers  ->  OpenTelemetry Collector  ->  Jaeger (traces), Prometheus (metrics)
 ```
 
 * Run at least two API replicas. Set `FORWARDED_ALLOW_IPS` to the load balancer's address range so `X-Forwarded-For` is trusted only from it.
@@ -22,6 +25,32 @@ Run two deployments from the same image:
 | `admin` (1-2 replicas, internal ingress only) | `TC_ENABLE_PLATFORM_ROUTES=true`, `TC_DDL_DATABASE_URL` set | `/platform/*`, `/system/*` |
 
 The schema-owner credential then exists only on the admin deployment, which should be reachable only over VPN or a zero-trust proxy. Platform MFA is enforced either way.
+
+## Background workers
+
+Run from the same image:
+
+| Process | Command | Replicas |
+|---|---|---|
+| worker | `celery -A app.workers.celery_app worker -Q default,deliveries,imports,maintenance --without-gossip --without-mingle` | 2 or more; scale `imports` separately if uploads are heavy (`-Q imports`) |
+| beat | `celery -A app.workers.celery_app beat` | **exactly one**: it only schedules the relay, dispatchers, stale-task sweeper and cleanup, but two beats double every schedule |
+
+* Workers need `TC_DATABASE_URL`, `TC_REDIS_URL` and `TC_CELERY_BROKER_URL`. Offboarding also needs `TC_DDL_DATABASE_URL` (owner role), so run it on a separate worker deployment consuming only `-Q maintenance` if you keep the owner credential off the general workers.
+* Give the broker its own Redis database or instance, with persistence (AOF) enabled. Losing the broker loses only in-flight messages: task state is in PostgreSQL and the sweeper re-sends queued tasks.
+* Set the pod termination grace period above `TC_CELERY_TASK_TIME_LIMIT_S` so a running task can finish; otherwise it is redelivered (`acks_late`) and re-runs idempotently.
+* Watch `system_dead_letters` (`GET /platform/dead-letters`) and the `tenantcore.jobs` metric's `dead_letter` outcome.
+
+## Observability
+
+* Set `TC_OTEL_ENABLED=true` and `TC_OTEL_EXPORTER_ENDPOINT` to the collector (OTLP/HTTP, port 4318). `infra/otel/collector.yaml` is a starting config: traces to Jaeger, metrics on a Prometheus endpoint.
+* Sampling: `TC_OTEL_SAMPLE_RATIO` for new root traces, parent-based otherwise.
+* Metrics: request/DB/Redis/HTTP-client metrics from the instrumentations, plus `tenantcore.cache.operations` (hit/miss), `tenantcore.outbound.duration`, `tenantcore.jobs`, `tenantcore.db.pool.connections` and `tenantcore.db.dedicated_engines`.
+* Logs are JSON with `trace_id`/`span_id` when a span is active, so logs and traces join.
+* `GET /platform/diagnostics/slow-queries` reports the top statements from `pg_stat_statements` (if the extension is installed) and tables dominated by sequential scans.
+
+## Load testing
+
+`loadtest/locustfile.py` defines a mixed read/search/write/QR profile for one tenant. It contains no results: run it from a separate machine against a production-like stack and record your own numbers. Raise the test tenant's rate limits first, or the run measures the limiter.
 
 ## Database bootstrap
 
@@ -63,6 +92,11 @@ To re-wrap stored secrets under the new key version, update each provider or dat
 4. `POST …/database/sync`. This bootstraps the database, replays the DDL ledger, and switches the tenant to dedicated routing. The switch is refused if the tenant still has rows in the shared dynamic tables.
 
 Later schema changes are applied automatically. If one fails, the tenant's data endpoints return 503 until `POST …/sync` succeeds.
+
+## Tenant offboarding
+
+* Production should use `TC_ARCHIVE_STORE=s3` with a bucket that has versioning, Object Lock (compliance mode) for your audit-retention period, and a KMS key. The worker role needs `s3:PutObject` and `kms:GenerateDataKey` only.
+* The local store writes envelope-encrypted files to `TC_ARCHIVE_DIR` and suits single-node development only.
 
 ## Backup and recovery
 

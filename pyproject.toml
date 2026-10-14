@@ -10,7 +10,7 @@ requires-python = ">=3.11"
 dependencies = [
   "fastapi>=0.115",
   "uvicorn[standard]>=0.30",
-  "sqlalchemy[asyncio]>=2.0.36",
+  "sqlalchemy[asyncio]>=2.0.36,<2.1",  # spec: SQLAlchemy 2.0; OTel instrumentation supports <2.1
   "asyncpg>=0.30",
   "psycopg[binary]>=3.2",
   "alembic>=1.14",
@@ -22,6 +22,16 @@ dependencies = [
   "structlog>=24.4",
   "cryptography>=43",
   "httpx>=0.27",
+  "celery[redis]>=5.4",
+  "segno>=1.6",
+  "openpyxl>=3.1",
+  "opentelemetry-sdk>=1.27",
+  "opentelemetry-exporter-otlp-proto-http>=1.27",
+  "opentelemetry-instrumentation-fastapi>=0.48b0",
+  "opentelemetry-instrumentation-sqlalchemy>=0.48b0",
+  "opentelemetry-instrumentation-redis>=0.48b0",
+  "opentelemetry-instrumentation-celery>=0.48b0",
+  "opentelemetry-instrumentation-httpx>=0.48b0",
 ]
 
 [project.optional-dependencies]
@@ -35,6 +45,7 @@ dev = [
   "ruff>=0.7",
   "mypy>=1.13",
   "pip-audit>=2.7",
+  "locust>=2.31",
 ]
 
 [tool.hatch.build.targets.wheel]
@@ -59,7 +70,8 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**" = ["S101", "S104", "S105", "S106", "S608", "PLR0915", "S311"]
+"tests/**" = ["S101", "S104", "S105", "S106", "S608", "PLR0915", "S311", "ASYNC109", "ASYNC240"]
+"loadtest/**" = ["S311"]
 "migrations/**" = ["E501"]
 
 [tool.mypy]
@@ -70,8 +82,14 @@ warn_unused_ignores = false
 exclude = ["migrations/"]
 
 [[tool.mypy.overrides]]
-module = ["asyncpg.*", "boto3.*", "botocore.*", "aiomysql.*", "oracledb.*"]
+module = ["asyncpg.*", "boto3.*", "botocore.*", "aiomysql.*", "oracledb.*", "celery.*", "kombu.*", "segno.*", "openpyxl.*", "locust.*"]
 ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["app.workers.tasks", "app.workers.celery_app"]
+disallow_untyped_decorators = false
+disallow_subclassing_any = false
+warn_return_any = false
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

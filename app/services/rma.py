@@ -41,6 +41,7 @@ from app.services import ledger
 from app.services.audit import AuditContext, record
 from app.services.authz import Principal
 from app.services.inventory import new_number
+from app.services.outbox import emit
 from app.services.payments import PaymentService
 
 TRANSITIONS: dict[str, tuple[set[RmaStatus], RmaStatus]] = {
@@ -88,8 +89,9 @@ class RmaService:
                     await s.execute(select(AppOrderItem).where(AppOrderItem.order_id == order_id))
                 ).scalars()
             }
-            pending = dict(
-                (
+            pending: dict[uuid.UUID, int] = {
+                r[0]: int(r[1])
+                for r in (
                     await s.execute(
                         select(RmaItem.order_item_id, func.sum(RmaItem.qty))
                         .join(RmaRequest, RmaRequest.id == RmaItem.rma_id)
@@ -97,7 +99,7 @@ class RmaService:
                         .group_by(RmaItem.order_item_id)
                     )
                 ).all()
-            )
+            }
             for ln in lines:
                 item = items.get(ln.order_item_id)
                 if item is None:
@@ -210,6 +212,17 @@ class RmaService:
                 resource="rma",
                 resource_id=str(rma_id),
                 detail={"from": old.value, "to": target.value, **detail},
+            )
+            await emit(
+                s,
+                p.tenant_id,
+                "rma.status_changed",
+                {
+                    "rma_id": rma.id,
+                    "order_id": rma.order_id,
+                    "from": old.value,
+                    "to": target.value,
+                },
             )
             await s.commit()
         return rma

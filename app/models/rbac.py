@@ -30,8 +30,27 @@ from app.models.base import Base, TimestampMixin, tenant_fk, uuid_pk
 #   ADMIN_RESOURCES support only "read" and "manage".
 #   DOMAIN_RESOURCES support create/read/update/delete/manage (manage = privileged operations such as
 #   stock adjustments, PO receiving, RMA approval/refund, provider configuration).
-ADMIN_RESOURCES = ("users", "roles", "api_keys", "audit_logs", "settings", "analytics")
-DOMAIN_RESOURCES = ("products", "inventory", "purchasing", "orders", "rma", "payments", "maps")
+ADMIN_RESOURCES = (
+    "users",
+    "roles",
+    "api_keys",
+    "audit_logs",
+    "settings",
+    "analytics",
+    "webhooks",
+    "notifications",
+)
+DOMAIN_RESOURCES = (
+    "products",
+    "inventory",
+    "purchasing",
+    "orders",
+    "rma",
+    "payments",
+    "maps",
+    "imports",
+    "deliveries",
+)
 BUILTIN_RESOURCES = ADMIN_RESOURCES + DOMAIN_RESOURCES
 RESOURCE_REGEX = r"^(data\.[a-z][a-z0-9_]{0,62}|" + "|".join(BUILTIN_RESOURCES) + r")$"
 

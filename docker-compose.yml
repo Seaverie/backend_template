@@ -45,6 +45,9 @@ services:
       TC_DATABASE_URL: postgresql+asyncpg://tc_app:${TC_APP_PASSWORD}@postgres:5432/tenantcore
       TC_DDL_DATABASE_URL: postgresql+asyncpg://tc_owner:${TC_OWNER_PASSWORD}@postgres:5432/tenantcore
       TC_REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
+      TC_CELERY_BROKER_URL: redis://:${REDIS_PASSWORD}@redis:6379/1
+      TC_OTEL_ENABLED: "true"
+      TC_OTEL_EXPORTER_ENDPOINT: http://otel-collector:4318
       FORWARDED_ALLOW_IPS: 127.0.0.1
     ports: ["127.0.0.1:8000:8000"]
     depends_on:
@@ -55,5 +58,51 @@ services:
       interval: 5s
       retries: 10
 
+  # Background jobs: imports, offboarding, outbox relay, webhook/push delivery, maintenance.
+  worker:
+    build: .
+    command: ["celery", "-A", "app.workers.celery_app", "worker", "-Q", "default,deliveries,imports,maintenance",
+              "--concurrency", "4", "--without-gossip", "--without-mingle", "-l", "info"]
+    env_file: .env
+    environment: &worker_env
+      TC_DATABASE_URL: postgresql+asyncpg://tc_app:${TC_APP_PASSWORD}@postgres:5432/tenantcore
+      TC_DDL_DATABASE_URL: postgresql+asyncpg://tc_owner:${TC_OWNER_PASSWORD}@postgres:5432/tenantcore
+      TC_REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
+      TC_CELERY_BROKER_URL: redis://:${REDIS_PASSWORD}@redis:6379/1
+      TC_OTEL_ENABLED: "true"
+      TC_OTEL_EXPORTER_ENDPOINT: http://otel-collector:4318
+      TC_ARCHIVE_DIR: /archives
+    volumes:
+      - archives:/archives
+    stop_grace_period: 6m  # let a running task finish (acks_late redelivers it otherwise)
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+      redis: {condition: service_healthy}
+
+  # Exactly one beat per deployment: it only schedules; duplicates would double the schedule.
+  beat:
+    build: .
+    command: ["celery", "-A", "app.workers.celery_app", "beat", "-l", "info", "-s", "/tmp/celerybeat-schedule"]
+    env_file: .env
+    environment: *worker_env
+    depends_on:
+      redis: {condition: service_healthy}
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.111.0
+    command: ["--config=/etc/otelcol/config.yaml"]
+    volumes:
+      - ./infra/otel/collector.yaml:/etc/otelcol/config.yaml:ro
+    ports:
+      - "127.0.0.1:8889:8889"  # Prometheus scrape endpoint for metrics
+
+  jaeger:
+    image: jaegertracing/all-in-one:1.62.0
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "127.0.0.1:16686:16686"  # Jaeger UI
+
 volumes:
   pgdata:
+  archives:

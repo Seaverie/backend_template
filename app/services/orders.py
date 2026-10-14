@@ -43,6 +43,7 @@ from app.services import ledger
 from app.services.audit import AuditContext, record
 from app.services.authz import Principal
 from app.services.inventory import new_number
+from app.services.outbox import emit
 
 MAX_ITEMS = 100
 
@@ -285,6 +286,18 @@ class OrderService:
                 resource_id=str(order.id),
                 detail={"total": str(total), "lines": len(items)},
             )
+            await emit(
+                s,
+                p.tenant_id,
+                "order.created",
+                {
+                    "order_id": order.id,
+                    "number": order.number,
+                    "status": initial.code,
+                    "total": total,
+                    "currency": order.currency,
+                },
+            )
             await s.commit()
         return order
 
@@ -423,6 +436,17 @@ class OrderService:
                 resource="orders",
                 resource_id=str(order_id),
                 detail={"from": current.code, "to": target.code},
+            )
+            await emit(
+                s,
+                p.tenant_id,
+                "order.status_changed",
+                {
+                    "order_id": order_id,
+                    "number": order.number,
+                    "from": current.code,
+                    "to": target.code,
+                },
             )
             await s.commit()
         return order

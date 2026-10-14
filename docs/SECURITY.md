@@ -152,13 +152,67 @@ Dedicated tenant databases use a separate guard: host addresses must fall inside
   * The last accepted time step is stored, so a code cannot be replayed even inside its validity window.
 * Set `TC_ENABLE_PLATFORM_ROUTES=false` and leave `TC_DDL_DATABASE_URL` unset on request-serving deployments. They then expose no platform routes and hold no owner credential.
 
-## Known limitations (Phase 2)
+## Background jobs
+
+* Workers run with the same restricted runtime role as the API. Every job opens a tenant-scoped transaction for the tenant named on the task row, so RLS applies to background work exactly as it does to requests. Platform-wide steps (claiming outbox rows and deliveries, dead letters) use the narrow `platform_ops` policies; they never see tenant data tables.
+* Task messages carry ids only (`tenant_id`, `task_row_id`). Inputs, results and status live in `system_tasks`, under RLS, so a tenant can read only its own tasks and only the creator or a tenant admin can read a given task.
+* An import re-checks the submitter's permissions (role, row scope, writable fields) at execution time, not only at upload. A permission revoked while the task waited in the queue is enforced.
+* Delivery is at-least-once: `acks_late` plus `reject_on_worker_lost` redeliver a task whose worker died. Every job is idempotent: imports use deterministic row ids (`uuid5(task_id, row_number)`) with `ON CONFLICT DO NOTHING`; offboarding steps check what is already done; deliveries are unique per (target, event). **Exactly-once execution is not claimed.**
+* Retries use exponential backoff with jitter and are bounded. Exhausted or non-retryable tasks are written to `system_dead_letters` (platform-only) and their task row is marked failed. Platform admins can requeue them.
+* If the broker is down at submission time the task row stays `queued`; the stale-task sweeper re-sends it. Submission never depends on the broker being reachable.
+
+## Transactional outbox
+
+Domain events (`order.*`, `payment.*`, `rma.status_changed`, `data.*`, `import.*`, `delivery.ping`) are inserted into `outbox_events` in the same transaction as the change, so an event exists if and only if the change committed. A relay claims unpublished events with `FOR UPDATE SKIP LOCKED` and turns them into per-target delivery rows.
+
+For tenants on a dedicated database, the data change commits in the tenant's database and the event in the control plane. Those two writes are **not** atomic: a crash between them can lose a `data.*` event (never invent one). This is documented rather than hidden; a dedicated-side outbox is on the roadmap.
+
+## Webhooks
+
+* Endpoints must be HTTPS on an allowed port (`TC_WEBHOOK_ALLOWED_PORTS`, default 443). The URL is validated against the SSRF guard when it is saved and again on every delivery, so a hostname re-pointed at a private address afterwards (DNS rebinding) is blocked before anything is sent. Such a delivery is dead-lettered and the endpoint disabled.
+* Each endpoint has its own signing secret (`whsec_…`), shown once, stored envelope-encrypted, and rotatable. Requests carry `X-TenantCore-Event-Id`, `X-TenantCore-Event-Type` and `X-TenantCore-Signature: t=<unix>,v1=<hex HMAC-SHA256 of "t.body">`. Receivers should verify the signature, reject old timestamps, and deduplicate on the event id.
+* Retries back off exponentially with jitter up to `TC_WEBHOOK_MAX_ATTEMPTS`. `410 Gone` disables the endpoint at once; repeated failures (`TC_WEBHOOK_DISABLE_AFTER_FAILURES`) disable it automatically.
+* Response bodies are not stored; only the status code and a short error class are kept.
+
+## Push notifications
+
+* Device tokens are stored envelope-encrypted, with a SHA-256 hash for de-duplication. They are never returned by the API.
+* FCM is called through the SSRF-safe client with a fixed host allowlist (`oauth2.googleapis.com`, `fcm.googleapis.com`), authenticated with a short-lived RS256 service-account assertion. Tokens FCM reports as unregistered are deactivated.
+* Templates use `string.Template` substitution of top-level scalar values only, truncated, so a template cannot reach object attributes or format specifiers.
+
+## File imports
+
+* Size, row-count and (for XLSX) uncompressed-size and zip-entry limits are enforced before parsing, which blocks zip bombs. CSV must be UTF-8 without NUL bytes. XLSX is parsed read-only by openpyxl; formulas are not evaluated.
+* Headers are checked against the table's writable fields for the submitting user; unknown, duplicate or forbidden columns reject the whole file.
+* Uploaded files live in `system_files` (tenant-scoped, RLS) and expire after `TC_FILE_RETENTION_DAYS`. The runtime role cannot modify them.
+
+## Tenant offboarding and erasure
+
+`POST /platform/tenants/{id}/offboard` (platform admin, slug typed back as confirmation) runs a background task:
+
+1. Freeze: status `offboarding`; tokens, sessions and API keys stop working immediately.
+2. Archive the audit log (and a dedicated database's audit log) as gzip JSONL: envelope-encrypted locally, or SSE-KMS on S3. Location and SHA-256 are recorded in `tenant_archives`.
+3. Optionally drop TenantCore's objects from a dedicated database. The database itself belongs to the customer and is never dropped.
+4. Purge every tenant row from every shared and dynamic table in one owner transaction, still scoped by RLS to that tenant. The append-only triggers on audit, ledger, RMA and status-history tables allow `DELETE` only inside a platform transaction whose `app.purge_tenant` names that same tenant; `TRUNCATE` is always refused.
+5. Delete every Redis key that embeds the tenant id, plus cached API-key metadata.
+6. Record a platform audit entry with per-table row counts and archive checksums.
+
+Each step is safe to re-run after a crash. Backups taken before the erasure still contain the tenant's data; expire them per your retention policy.
+
+## Telemetry
+
+* OpenTelemetry is off unless `TC_OTEL_ENABLED=true`. Spans go over OTLP to a collector you run.
+* SQL spans carry the parameterised statement, never bound values. Redis spans record the command with arguments replaced by `?`. HTTP client spans record method, host and status. Health checks are not traced. The collector config also strips authorization headers as a second line of defence.
+* Outbound-latency metrics label tenant webhook hosts as `tenant_endpoint`, so customer endpoints are not exported as metric labels.
+
+## Known limitations
 
 * JWTs use HS256 with symmetric keys. Move to EdDSA if third parties must verify tokens.
 * `last_used_at` on API keys is not yet updated, to avoid a write on every request.
 * Rate-limit Lua scripts need every key on one Redis node. Use hash tags if you move to Redis Cluster.
-* Schema changes are fanned out to dedicated databases synchronously inside the platform DDL request. Phase 3 moves this to background workers.
-* Inventory, orders, payments and returns always live in the control-plane database, even for dedicated tenants. Only dynamic-table data (`/data/*`) is routed to dedicated databases in Phase 2.
-* Payment webhooks update payment and order amounts but do not move orders between statuses automatically. Tenants transition orders explicitly; notification rules are Phase 3.
+* Schema changes are fanned out to dedicated databases synchronously inside the platform DDL request; a failed fan-out leaves that tenant at 503 until a manual sync.
+* Inventory, orders, payments and returns always live in the control-plane database, even for dedicated tenants. Only dynamic-table data (`/data/*`) is routed to dedicated databases.
+* `data.*` outbox events for dedicated tenants are not atomic with the data change (see above).
+* Payment events do not move orders between statuses automatically; they trigger webhooks and notifications, and tenants transition orders explicitly.
 * Snapshot import is additive only. It never drops tables or fields, and it refuses to proceed if any field definition conflicts.
-* The local KMS provider exists for development. Production must use `vault` or `aws`; settings validation enforces this.
+* The local KMS provider and local archive store exist for development. Production must use `vault` or `aws` (enforced) and should use the S3 archive store.

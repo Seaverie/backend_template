@@ -28,6 +28,7 @@ jobs:
       TC_DATABASE_URL: postgresql+asyncpg://tc_app:app_ci_pw@127.0.0.1:5432/tenantcore
       TC_DDL_DATABASE_URL: postgresql+asyncpg://tc_owner:owner_ci_pw@127.0.0.1:5432/tenantcore
       TC_REDIS_URL: redis://127.0.0.1:6379/15
+      TC_CELERY_BROKER_URL: redis://127.0.0.1:6379/14
       TC_REQUIRE_INTEGRATION: "1"  # fail, never silently skip, if services are missing
       TC_TEST_ADMIN_URL: postgresql://postgres:postgres@127.0.0.1:5432/postgres  # dedicated-DB tests
     steps:

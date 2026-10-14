@@ -74,7 +74,7 @@ class Keys:
 class Cache:
     def __init__(self, settings: Settings) -> None:
         self.keys = Keys(settings.redis_key_prefix)
-        self.client: aioredis.Redis = aioredis.from_url(
+        self.client: aioredis.Redis = aioredis.from_url(  # type: ignore[no-untyped-call,unused-ignore]
             settings.redis_url.get_secret_value(),
             socket_timeout=settings.redis_timeout_s,
             socket_connect_timeout=settings.redis_timeout_s,
@@ -86,6 +86,11 @@ class Cache:
 
     async def get_json(self, key: str) -> Any | None:
         raw = await self.client.get(key)
+        from app.observability import CACHE_OPS
+
+        CACHE_OPS.add(
+            1, {"result": "miss" if raw is None else "hit", "kind": key.split(":")[1] if ":" in key else ""}
+        )
         return None if raw is None else json.loads(raw)
 
     async def set_json(self, key: str, value: Any, ttl_s: int, *, nx: bool = False) -> bool:

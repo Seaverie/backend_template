@@ -36,9 +36,13 @@ class _BodyTooLarge(HTTPException):
 
 
 class RequestContextMiddleware:
-    def __init__(self, app: ASGIApp, *, max_body_bytes: int) -> None:
+    def __init__(
+        self, app: ASGIApp, *, max_body_bytes: int, path_limits: dict[str, int] | None = None
+    ) -> None:
         self.app = app
         self.max_body = max_body_bytes
+        # Larger limits for specific path prefixes (e.g. file uploads); everything else stays small.
+        self.path_limits = sorted((path_limits or {}).items(), key=lambda kv: -len(kv[0]))
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
@@ -53,10 +57,12 @@ class RequestContextMiddleware:
         start = time.perf_counter()
         status_holder: dict[str, int] = {"status": 500}
 
+        path = scope.get("path", "")
+        limit = next((v for k, v in self.path_limits if path.startswith(k)), self.max_body)
         declared = headers.get(b"content-length")
         if declared is not None:
             try:
-                too_big = int(declared) > self.max_body
+                too_big = int(declared) > limit
             except ValueError:
                 too_big = True
             if too_big:
@@ -71,7 +77,7 @@ class RequestContextMiddleware:
             message = await receive()
             if message["type"] == "http.request":
                 received += len(message.get("body", b""))
-                if received > self.max_body:
+                if received > limit:
                     raise _BodyTooLarge
             return message
 

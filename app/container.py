@@ -14,9 +14,13 @@ from app.services.analytics import AnalyticsService
 from app.services.api_keys import ApiKeyService
 from app.services.auth import AuthService
 from app.services.authz import AuthzService
+from app.services.deliveries import DeliveryService
 from app.services.idempotency import IdempotencyService
+from app.services.imports import ImportService
 from app.services.inventory import InventoryService
 from app.services.maps import MapService
+from app.services.notifications import NotificationService
+from app.services.offboarding import OffboardingService
 from app.services.orders import OrderService
 from app.services.payments import PaymentService
 from app.services.providers import ProviderService
@@ -26,6 +30,7 @@ from app.services.rma import RmaService
 from app.services.schema import SchemaService
 from app.services.tenant_db import TenantDbService
 from app.services.tenants import TenantService
+from app.services.webhooks import WebhookService
 
 
 @dataclass
@@ -52,6 +57,11 @@ class Container:
     analytics: AnalyticsService
     maps: MapService
     tenant_db: TenantDbService
+    webhooks: WebhookService
+    notifications: NotificationService
+    imports: ImportService
+    offboarding: OffboardingService
+    deliveries: DeliveryService
 
     @classmethod
     def build(cls, settings: Settings) -> Container:
@@ -67,6 +77,10 @@ class Container:
         )
         providers = ProviderService(settings, db, cache, envelope, http)
         payments = PaymentService(db, providers)
+        tenant_db = TenantDbService(settings, db, envelope, schema, tenants)
+        outbound = SafeHttpClient(
+            timeout_s=settings.outbound_timeout_s, max_response_bytes=settings.outbound_max_response_bytes
+        )
         return cls(
             settings=settings,
             db=db,
@@ -89,11 +103,17 @@ class Container:
             rma=RmaService(db, payments),
             analytics=AnalyticsService(settings, db),
             maps=MapService(settings, cache, providers),
-            tenant_db=TenantDbService(settings, db, envelope, schema, tenants),
+            tenant_db=tenant_db,
+            webhooks=WebhookService(settings, db, envelope, outbound),
+            notifications=NotificationService(settings, db, envelope, outbound),
+            imports=ImportService(settings, db, schema, authz, tenants, tenant_db),
+            offboarding=OffboardingService(settings, db, cache, envelope, schema, tenants, tenant_db),
+            deliveries=DeliveryService(db),
         )
 
     async def close(self) -> None:
         await self.tenant_db.close()
         await self.http.close()
+        await self.webhooks.http.close()
         await self.cache.close()
         await self.db.dispose()

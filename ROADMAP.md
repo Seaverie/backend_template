@@ -26,27 +26,34 @@ The specification was split into three phases so that no security path ships as 
 | §8 SSRF protection for providers and database routing | ✅ |
 | Platform hardening | ✅ TOTP MFA, and the platform/DDL routes and owner credential can be split off from request-serving deployments. |
 
-## Phase 3: async, offboarding, observability
+## Phase 3: async, offboarding, observability ✅
 
-* **Workers**
-  * Celery with exponential backoff, jitter, bounded retries, timeouts, and a dead-letter queue.
-  * A transactional outbox.
-  * Move dedicated-database schema fan-out to workers.
-* **Webhooks and imports**
-  * `app_webhooks` with signed payloads, event IDs, delivery tracking, and the SSRF-safe client.
-  * `POST /import/excel/{table}` and `GET /tasks/{id}`.
-  * `GET /qrcode/generate`.
-* **Notifications**
-  * FCM notification rules, `system_user_devices`, and `delivery_tracking_pings`.
-  * Automatic order transitions on payment events through notification rules.
-* **Offboarding**
-  * GDPR/CCPA tenant offboarding: cascading purge, dedicated-pool teardown, Redis key scavenging, and cold-storage archiving of audit logs.
+| Spec section | Status |
+|---|---|
+| §1 Remaining tables | ✅ `system_files`, `app_webhooks`, `app_notification_rules`, `delivery_tracking_pings` and `system_user_devices`, plus `outbox_events`, `webhook_deliveries`, `notification_deliveries`, `system_tasks`, `system_dead_letters` and `tenant_archives`. All with RLS and least-privilege grants. |
+| §2 FCM | ✅ Notification rules, device registration, FCM HTTP v1 with a service-account JWT, deactivation of unregistered tokens. |
+| §2 Delivery tracking | ✅ `POST`/`GET /orders/{id}/delivery-pings`. |
+| §7 Celery | ✅ `acks_late`, time limits, exponential backoff with jitter, bounded retries, dead letters with requeue, stale-task sweeper, beat schedule. |
+| §7 Transactional outbox | ✅ Events written in the same transaction as the change; relay with `SKIP LOCKED`. |
+| §7 Webhooks | ✅ Signed payloads, event ids, per-delivery durable retries, auto-disable, redelivery, SSRF checks at save and send time. |
+| §7 Imports | ✅ `POST /import/excel/{table}` (CSV and XLSX), `GET /tasks/{id}`, idempotent re-runs, two modes. |
+| §7 QR codes | ✅ `GET /qrcode/generate` (PNG or SVG). |
+| Offboarding | ✅ Freeze, encrypted archive, dedicated-database teardown, purge across all shared and dynamic tables, Redis scavenging, erasure record. |
+| §9 Observability | ✅ OpenTelemetry for FastAPI, SQLAlchemy, Redis, Celery and httpx; OTLP to a collector, Jaeger; pool, cache, outbound and job metrics; trace ids in logs; slow-query diagnostics. |
+| §10 Load testing | ✅ Locust profile. No results are published; numbers must come from your own runs. |
+| §10 Deployment | ✅ docker-compose adds worker, beat, collector and Jaeger. |
+
+## Not built yet
+
+These are known gaps, not hidden ones. Each is also listed in [docs/SECURITY.md](docs/SECURITY.md#known-limitations).
+
 * **Dedicated databases**
-  * Data routing for MySQL and Oracle, through dialect-specific DDL generation.
-  * Routing of domain tables (inventory, orders) to dedicated databases.
-* **Observability**
-  * OpenTelemetry for FastAPI, SQLAlchemy, Redis, Celery, and httpx.
-  * OTLP export through a collector to Jaeger.
-  * Metrics for pools, cache, queues, and providers.
-* **Load testing**
-  * Reproducible k6 or Locust scripts. Results will be published only from real runs.
+  * Data routing for MySQL and Oracle (currently 501). These dialects have no RLS; isolation would rest on the database being single-tenant.
+  * Routing of domain tables (inventory, orders, payments, returns) to dedicated databases.
+  * Moving schema fan-out to dedicated databases into a background job.
+  * An outbox inside the dedicated database, so `data.*` events there are atomic with the change.
+* **Workflow**
+  * Automatic order transitions driven by payment events.
+* **Operations**
+  * Queue-depth metrics (broker-specific; use a Redis/Celery exporter meanwhile).
+  * Redis Cluster support for the rate-limit scripts (hash tags).

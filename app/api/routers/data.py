@@ -19,6 +19,7 @@ from app.dynamic.schema import TableMeta
 from app.models import Action
 from app.services.audit import record
 from app.services.authz import Grant, Principal
+from app.services.outbox import emit
 
 router = APIRouter(prefix="/data", tags=["data"])
 
@@ -41,6 +42,25 @@ async def _resolve(
     if grant is None:  # unreachable: require() raised above
         raise NotFound()
     return meta, await c.schema.sa_table(meta), grant
+
+
+async def _emit(
+    c: Container, request: Request, p: Principal, s: Any, event: str, table: str, record_id: uuid.UUID
+) -> None:
+    """Shared tenants: the event joins the data transaction (transactional outbox)."""
+    if not request.state.tenant_dedicated:
+        await emit(s, p.tenant_id, event, {"table": table, "record_id": record_id})
+
+
+async def _emit_after(
+    c: Container, request: Request, p: Principal, event: str, table: str, record_id: uuid.UUID
+) -> None:
+    """Dedicated tenants: the data lives in another database, so the outbox row (control plane) is
+    written right after the data commit. A crash in between loses that one event; documented."""
+    if request.state.tenant_dedicated:
+        async with c.db.tenant_session(p.tenant_id, user_id=p.user_id) as cs:
+            await emit(cs, p.tenant_id, event, {"table": table, "record_id": record_id})
+            await cs.commit()
 
 
 async def _json_body(request: Request) -> Any:
@@ -149,7 +169,9 @@ async def create_record(
                 resource_id=str(record_id),
                 detail={"values": crud.audit_values(meta, values)},
             )
+            await _emit(c, request, p, s, "data.created", meta.name, record_id)
             await s.commit()
+        await _emit_after(c, request, p, "data.created", meta.name, record_id)
         return JSONResponse(out, status_code=201)
 
     return await c.idempotency.run(request, p, required=meta.require_idempotency, handler=handler)
@@ -179,7 +201,9 @@ async def update_record(
                 resource_id=str(record_id),
                 detail={"values": crud.audit_values(meta, values)},
             )
+            await _emit(c, request, p, s, "data.updated", meta.name, record_id)
             await s.commit()
+        await _emit_after(c, request, p, "data.updated", meta.name, record_id)
         return JSONResponse(out)
 
     return await c.idempotency.run(request, p, required=False, handler=handler)
@@ -204,5 +228,7 @@ async def delete_record(
             resource=meta.resource,
             resource_id=str(record_id),
         )
+        await _emit(c, request, p, s, "data.deleted", meta.name, record_id)
         await s.commit()
+    await _emit_after(c, request, p, "data.deleted", meta.name, record_id)
     return Response(status_code=204)

@@ -14,6 +14,8 @@ COPY --from=build /venv /venv
 COPY app ./app
 COPY migrations ./migrations
 COPY alembic.ini ./
+# Local archive store for offboarding (mount a volume here; production should use TC_ARCHIVE_STORE=s3).
+RUN mkdir -m 0700 /archives && chown 10001:10001 /archives
 USER 10001:10001
 EXPOSE 8000
 # --proxy-headers trusts X-Forwarded-* only from FORWARDED_ALLOW_IPS (set to your load balancer range).

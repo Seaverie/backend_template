@@ -59,6 +59,12 @@ def _context_processor(_: Any, __: str, event_dict: EventDict) -> EventDict:
     return event_dict
 
 
+def _trace_processor(logger: Any, method: str, event_dict: EventDict) -> EventDict:
+    from app.observability import trace_context_processor
+
+    return trace_context_processor(logger, method, event_dict)
+
+
 def configure_logging(level: str = "INFO", json_output: bool = True) -> None:
     logging.basicConfig(format="%(message)s", stream=sys.stdout, level=level.upper(), force=True)
     # SQLAlchemy echo would print bound parameters; keep it off. Slow queries are logged by our hook.
@@ -70,6 +76,7 @@ def configure_logging(level: str = "INFO", json_output: bool = True) -> None:
             structlog.processors.add_log_level,
             structlog.processors.TimeStamper(fmt="iso", utc=True),
             _context_processor,
+            _trace_processor,
             _redact_processor,
             structlog.processors.format_exc_info,
             renderer,
