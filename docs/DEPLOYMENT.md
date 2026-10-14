@@ -57,7 +57,7 @@ Run from the same image:
 1. A DBA runs `infra/postgres/01-roles.sh` once, as a superuser. It creates `tc_owner` and `tc_app` and the database, and revokes PUBLIC privileges.
 2. Migrations run as `tc_owner` (`TC_DDL_DATABASE_URL`) with `alembic upgrade head`, as a pre-deploy job.
 3. The runtime connection uses `tc_app` (`TC_DATABASE_URL`). Only the admin deployment also gets `TC_DDL_DATABASE_URL` (`tc_owner`), which dynamic DDL uses; see Deployments above.
-4. Bootstrap the first platform admin with `python -m app.cli create-platform-admin --email …`. The password comes from `TC_BOOTSTRAP_PASSWORD` or a prompt.
+4. Bootstrap the first platform admin, either with `python -m app.cli seed` (reads `TC_SEED_ADMIN_EMAIL` / `TC_SEED_ADMIN_PASSWORD` from your secret store; idempotent) or with `python -m app.cli create-platform-admin --email …` (password from `TC_BOOTSTRAP_PASSWORD` or a prompt). In production MFA is required, so enroll it on first sign-in.
 
 ## Secrets
 
