@@ -199,7 +199,7 @@ class WebhookService:
                     await s.execute(
                         select(WebhookDelivery)
                         .where(WebhookDelivery.webhook_id == webhook_id)
-                        .order_by(WebhookDelivery.created_at.desc())
+                        .order_by(WebhookDelivery.created_at.desc(), WebhookDelivery.id.desc())
                         .limit(limit)
                     )
                 ).scalars()

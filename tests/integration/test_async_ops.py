@@ -41,6 +41,9 @@ class Net:
         self.requests: list[httpx.Request] = []
         self.responses: list[httpx.Response] = []
         self.dns: dict[str, list[str]] = {}
+        self.by_path: dict[
+            str, list[httpx.Response]
+        ] = {}  # scripted per path, so other due deliveries can't consume them
 
     async def resolve(self, host: str, port: int) -> list[str]:
         for key, addrs in self.dns.items():
@@ -50,10 +53,29 @@ class Net:
 
     def handler(self, req: httpx.Request) -> httpx.Response:
         self.requests.append(req)
+        if self.by_path.get(req.url.path):
+            return self.by_path[req.url.path].pop(0)
         return self.responses.pop(0) if self.responses else httpx.Response(200, json={"ok": True})
 
     def client(self) -> SafeHttpClient:
         return SafeHttpClient(transport=httpx.MockTransport(self.handler), resolver=self.resolve)
+
+
+@pytest.fixture(autouse=True)
+async def _isolate_background_work(container: Container) -> None:
+    """The relay and dispatchers work platform-wide, so park whatever earlier tests left due
+    (unpublished events, pending deliveries). Each test then sees only its own work."""
+    async with container.db.ddl_session() as s:
+        await s.execute(text("SELECT set_config('app.is_platform', 'on', true)"))
+        await s.execute(text("UPDATE outbox_events SET published_at = now() WHERE published_at IS NULL"))
+        for table in ("webhook_deliveries", "notification_deliveries"):
+            await s.execute(
+                text(
+                    f"UPDATE {table} SET next_attempt_at = now() + interval '100 years'"
+                    " WHERE status = 'pending'"
+                )
+            )
+        await s.commit()
 
 
 @pytest.fixture
@@ -181,11 +203,14 @@ async def test_webhook_signed_delivery_retry_and_isolation(
     assert await jobs.relay_outbox(container) >= 1
     assert all(e.published_at is not None for e in await outbox(container, a))
 
-    net.responses = [httpx.Response(500)]
+    # The dispatcher sends every due delivery platform-wide; script and inspect only this endpoint.
+    net.by_path["/tenant-a"] = [httpx.Response(500)]
     out = await jobs.dispatch_webhooks(container)
-    assert out.get("pending") == 1
-    req = net.requests[-1]
-    assert req.url.path == "/tenant-a" and req.headers["host"] == "hooks.example.com"
+    assert out.get("pending", 0) >= 1
+    sent = [r for r in net.requests if r.url.path == "/tenant-a"]
+    assert len(sent) == 1
+    req = sent[0]
+    assert req.headers["host"] == "hooks.example.com"
     body = req.content
     event = json.loads(body)
     assert (
@@ -194,15 +219,21 @@ async def test_webhook_signed_delivery_retry_and_isolation(
     assert req.headers["x-tenantcore-event-id"] == event["id"]
     assert verify_sig(body, req.headers["x-tenantcore-signature"], secret)
 
-    deliveries = (await client.get(f"{P}/webhooks/{hook_id}/deliveries", headers=a.h)).json()["items"]
-    assert deliveries[0]["status"] == "pending" and deliveries[0]["last_status_code"] == 500
-    assert datetime.fromisoformat(deliveries[0]["next_attempt_at"]) > datetime.now(UTC)  # backed off
-    assert await jobs.dispatch_webhooks(container) == {}  # not due yet
+    async def delivery() -> dict[str, Any]:
+        items = (await client.get(f"{P}/webhooks/{hook_id}/deliveries", headers=a.h)).json()["items"]
+        return next(x for x in items if x["event_id"] == event["id"])
+
+    d = await delivery()
+    assert d["status"] == "pending" and d["last_status_code"] == 500
+    assert datetime.fromisoformat(d["next_attempt_at"]) > datetime.now(UTC)  # backed off
+    await jobs.dispatch_webhooks(container)
+    assert len([r for r in net.requests if r.url.path == "/tenant-a"]) == 1  # not due yet: not resent
     async with container.db.tenant_session(uuid.UUID(a.id)) as s:
         await s.execute(text("UPDATE webhook_deliveries SET next_attempt_at = now() - interval '1 second'"))
         await s.commit()
-    assert (await jobs.dispatch_webhooks(container)).get("succeeded") == 1
-    again = net.requests[-1]
+    await jobs.dispatch_webhooks(container)
+    assert (await delivery())["status"] == "succeeded"
+    again = [r for r in net.requests if r.url.path == "/tenant-a"][-1]
     assert again.headers["x-tenantcore-event-id"] == event["id"]  # same event id on retry: receivers dedupe
     # Tenant B's endpoint never saw tenant A's event.
     assert all(r.url.path != "/tenant-b" for r in net.requests)
