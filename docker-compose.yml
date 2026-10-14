@@ -16,8 +16,6 @@ services:
       test: ["CMD-SHELL", "pg_isready -U postgres -d tenantcore"]
       interval: 3s
       retries: 20
-    # Host port is only for tools on your machine (psql, pgAdmin, DBeaver); containers use postgres:5432.
-    # On Windows, 5432 can be reserved or taken by a local PostgreSQL: set POSTGRES_HOST_PORT in .env.
     ports: ["127.0.0.1:${POSTGRES_HOST_PORT:-5432}:5432"]
 
   redis:
