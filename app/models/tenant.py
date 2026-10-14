@@ -20,6 +20,7 @@ from sqlalchemy import (
     Index,
     Integer,
     String,
+    Text,
     func,
 )
 from sqlalchemy.dialects.postgresql import UUID
@@ -76,6 +77,11 @@ class PlatformAdmin(Base, TimestampMixin):
     failed_logins: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
     locked_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # TOTP secret, envelope-encrypted (context: purpose=platform_mfa, id=<admin id>).
+    mfa_secret_enc: Mapped[str | None] = mapped_column(Text)
+    mfa_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
+    # Highest TOTP time step already accepted; codes at or below it are rejected (no replay).
+    mfa_last_step: Mapped[int | None] = mapped_column(BigInteger)
 
     __table_args__ = (Index("uq_platform_admins_email_lower", func.lower(email), unique=True),)
 

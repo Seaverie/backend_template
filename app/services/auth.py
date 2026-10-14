@@ -15,10 +15,12 @@ from sqlalchemy import func, select, update
 
 from app.cache.redis import Cache, safe
 from app.core.config import Settings
-from app.core.errors import Unauthorized
+from app.core.errors import Conflict, Unauthorized
 from app.core.logging import get_logger
 from app.db.session import Database
 from app.models import AppUser, AuthRefreshToken, AuthSession, PlatformAdmin, PlatformSession
+from app.security import totp
+from app.security.crypto import Envelope
 from app.security.passwords import burn_verification_time, hash_password, verify_password
 from app.security.tokens import TokenClaims, TokenService
 from app.services.audit import AuditContext, record
@@ -36,15 +38,26 @@ class TokenPair:
     token_type: str = "Bearer"  # noqa: S105 - token scheme name, not a secret
 
 
+def _mfa_context(admin_id: uuid.UUID) -> dict[str, str]:
+    return {"purpose": "platform_mfa", "id": str(admin_id)}
+
+
 def _now() -> datetime:
     return datetime.now(UTC)
 
 
 class AuthService:
     def __init__(
-        self, settings: Settings, db: Database, cache: Cache, tokens: TokenService, tenants: TenantService
+        self,
+        settings: Settings,
+        db: Database,
+        cache: Cache,
+        tokens: TokenService,
+        tenants: TenantService,
+        envelope: Envelope,
     ) -> None:
         self._s = settings
+        self._envelope = envelope
         self._db = db
         self._cache = cache
         self._tokens = tokens
@@ -260,7 +273,7 @@ class AuthService:
     # -- platform admins ------------------------------------------------------------------------
 
     async def platform_login(
-        self, *, email: str, password: str, ip: str | None, request_id: str | None
+        self, *, email: str, password: str, otp: str | None, ip: str | None, request_id: str | None
     ) -> TokenPair:
         async with self._db.platform_session(uuid.UUID(int=0)) as s:
             admin = (
@@ -279,6 +292,17 @@ class AuthService:
                 raise Unauthorized(_INVALID)
             valid, _ = await verify_password(admin.password_hash, password)
             ctx = AuditContext("platform", admin.id, request_id, ip)
+            mfa_ok = False
+            if valid and admin.mfa_enabled:
+                step = None
+                if otp and admin.mfa_secret_enc:
+                    secret = await self._envelope.decrypt_str(admin.mfa_secret_enc, _mfa_context(admin.id))
+                    step = totp.verify(secret, otp, last_used_step=admin.mfa_last_step)
+                if step is None:
+                    valid = False  # wrong/missing/replayed code counts as a failed login
+                else:
+                    admin.mfa_last_step = step
+                    mfa_ok = True
             if not valid or not admin.is_active:
                 admin.failed_logins += 1
                 if admin.failed_logins >= self._s.max_failed_logins:
@@ -317,6 +341,57 @@ class AuthService:
             sid=ps.id,
             tid=None,
             ttl_s=self._s.platform_access_ttl_s,
+            mfa=mfa_ok,
+        )
+        return TokenPair(access, None, self._s.platform_access_ttl_s)
+
+    async def mfa_setup(self, claims: TokenClaims) -> dict[str, str]:
+        """Generate a TOTP secret for the calling admin (not active until confirmed)."""
+        secret = totp.new_secret()
+        async with self._db.platform_session(claims.sub) as s:
+            admin = (
+                await s.execute(select(PlatformAdmin).where(PlatformAdmin.id == claims.sub).with_for_update())
+            ).scalar_one()
+            if admin.mfa_enabled:
+                raise Conflict("MFA is already enabled; an operator must reset it.")
+            admin.mfa_secret_enc = await self._envelope.encrypt_str(secret, _mfa_context(admin.id))
+            email = admin.email
+            await s.commit()
+        return {"secret": secret, "otpauth_uri": totp.provisioning_uri(secret, email, self._s.service_name)}
+
+    async def mfa_confirm(
+        self, claims: TokenClaims, code: str, *, ip: str | None, request_id: str | None
+    ) -> TokenPair:
+        """Activate MFA with a valid code and return a fresh MFA-verified token for the same session."""
+        async with self._db.platform_session(claims.sub) as s:
+            admin = (
+                await s.execute(select(PlatformAdmin).where(PlatformAdmin.id == claims.sub).with_for_update())
+            ).scalar_one()
+            if admin.mfa_enabled or not admin.mfa_secret_enc:
+                raise Conflict("Start MFA setup first.")
+            secret = await self._envelope.decrypt_str(admin.mfa_secret_enc, _mfa_context(admin.id))
+            step = totp.verify(secret, code, last_used_step=admin.mfa_last_step)
+            if step is None:
+                raise Unauthorized("Invalid code.")
+            admin.mfa_enabled = True
+            admin.mfa_last_step = step
+            await record(
+                s,
+                AuditContext("platform", admin.id, request_id, ip),
+                tenant_id=None,
+                action="platform.mfa_enabled",
+                resource="platform_admins",
+                resource_id=str(admin.id),
+            )
+            await s.commit()
+        access, _ = self._tokens.issue(
+            typ="access",
+            aud="platform",
+            sub=claims.sub,
+            sid=claims.sid,
+            tid=None,
+            ttl_s=self._s.platform_access_ttl_s,
+            mfa=True,
         )
         return TokenPair(access, None, self._s.platform_access_ttl_s)
 

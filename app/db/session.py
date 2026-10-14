@@ -45,15 +45,19 @@ class Database:
             settings.database_url.get_secret_value(),
             application_name=f"{settings.service_name}-app",
         )
-        # Small dedicated pool: DDL is rare and must not starve request traffic.
-        self.ddl_engine: AsyncEngine = create_engine(
-            settings,
-            settings.ddl_database_url.get_secret_value(),
-            application_name=f"{settings.service_name}-ddl",
-            pool_size=2,
-        )
+        # Small dedicated pool: DDL is rare and must not starve request traffic. Absent on deployments
+        # that do not serve platform routes, so the owner credential never reaches them.
+        self.ddl_engine: AsyncEngine | None = None
+        self._ddl_sessions: async_sessionmaker[AsyncSession] | None = None
+        if settings.ddl_database_url is not None:
+            self.ddl_engine = create_engine(
+                settings,
+                settings.ddl_database_url.get_secret_value(),
+                application_name=f"{settings.service_name}-ddl",
+                pool_size=2,
+            )
+            self._ddl_sessions = async_sessionmaker(self.ddl_engine, expire_on_commit=False, autoflush=False)
         self._sessions = async_sessionmaker(self.engine, expire_on_commit=False, autoflush=False)
-        self._ddl_sessions = async_sessionmaker(self.ddl_engine, expire_on_commit=False, autoflush=False)
 
     async def _apply(
         self,
@@ -118,6 +122,8 @@ class Database:
     @asynccontextmanager
     async def ddl_session(self) -> AsyncIterator[AsyncSession]:
         """Schema-owner connection for dynamic DDL. Platform-admin code paths only."""
+        if self._ddl_sessions is None:
+            raise RuntimeError("DDL database is not configured on this deployment")
         async with self._ddl_sessions() as session:
             await session.execute(
                 text(
@@ -129,4 +135,5 @@ class Database:
 
     async def dispose(self) -> None:
         await self.engine.dispose()
-        await self.ddl_engine.dispose()
+        if self.ddl_engine is not None:
+            await self.ddl_engine.dispose()

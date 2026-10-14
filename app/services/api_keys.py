@@ -33,12 +33,15 @@ from app.core.config import Settings
 from app.core.errors import Forbidden, NotFound, Unauthorized, ValidationFailed
 from app.db.session import Database
 from app.models import Action, TenantApiKey
+from app.models.rbac import BUILTIN_RESOURCES
 from app.security import api_keys as keyfmt
 from app.services.audit import AuditContext, record
 from app.services.authz import Principal
 
 _SCOPE_RE = re.compile(
-    r"^(data\.\*|data\.[a-z][a-z0-9_]{0,62}|users|roles|api_keys|audit_logs):(create|read|update|delete|manage|\*)$"
+    r"^(data\.\*|data\.[a-z][a-z0-9_]{0,62}|"
+    + "|".join(BUILTIN_RESOURCES)
+    + r"):(create|read|update|delete|manage|\*)$"
 )
 _NEGATIVE_TTL_S = 30
 MAX_ROTATION_GRACE_S = 86_400
@@ -80,7 +83,8 @@ class ApiKeyService:
         self._s = settings
         self._db = db
         self._cache = cache
-        self._pepper = settings.api_key_pepper.get_secret_value().encode()
+        self._peppers = {pid: pep.encode() for pid, pep in settings.pepper_keyring.items()}
+        self._active_pepper = settings.api_key_active_pepper
 
     # -- management -----------------------------------------------------------------------------
 
@@ -105,7 +109,8 @@ class ApiKeyService:
                 tenant_id=principal.tenant_id,
                 key_id=parsed.key_id,
                 name=name,
-                digest=keyfmt.digest(self._pepper, parsed),
+                digest=keyfmt.digest(self._peppers[self._active_pepper], parsed),
+                pepper_id=self._active_pepper,
                 scopes=scopes,
                 created_by_user_id=principal.user_id,
                 expires_at=(_now() + timedelta(days=expires_in_days)) if expires_in_days else None,
@@ -211,7 +216,8 @@ class ApiKeyService:
     def _check(self, parsed: keyfmt.ParsedKey, meta: dict[str, Any]) -> ApiKeyIdentity:
         if meta.get("state") != "active":
             raise Unauthorized("Invalid API key.")
-        if not keyfmt.verify(self._pepper, parsed, bytes.fromhex(meta["digest"])):
+        pepper = self._peppers.get(meta.get("pep", "p1"))
+        if pepper is None or not keyfmt.verify(pepper, parsed, bytes.fromhex(meta["digest"])):
             raise Unauthorized("Invalid API key.")
         exp = meta.get("exp")
         if exp is not None and datetime.fromisoformat(exp) <= _now():
@@ -239,6 +245,7 @@ class ApiKeyService:
             "tid": str(row.tenant_id),
             "uid": str(row.created_by_user_id),
             "digest": row.digest.hex(),
+            "pep": row.pepper_id,
             "scopes": list(row.scopes),
             "exp": row.expires_at.isoformat() if row.expires_at else None,
         }

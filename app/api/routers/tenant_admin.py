@@ -13,6 +13,7 @@ from app.api.deps import audit_ctx, container, rate_limited
 from app.container import Container
 from app.core.errors import Forbidden, ValidationFailed
 from app.models import Action, AppUser, RowScope, SystemAuditLog
+from app.models.rbac import RESOURCE_REGEX
 from app.services.authz import Principal
 from app.services.rbac import PermissionSpec
 
@@ -35,7 +36,7 @@ class UserPatchIn(BaseModel):
 
 class PermissionIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    resource: str = Field(..., pattern=r"^(data\.[a-z][a-z0-9_]{0,62}|users|roles|api_keys|audit_logs)$")
+    resource: str = Field(..., pattern=RESOURCE_REGEX)
     action: Action
     row_scope: RowScope = RowScope.all
     readable_fields: list[str] | None = Field(None, max_length=100)

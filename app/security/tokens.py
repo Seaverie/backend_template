@@ -33,6 +33,7 @@ class TokenClaims:
     tid: uuid.UUID | None
     exp: int
     iat: int
+    mfa: bool = False  # platform tokens: whether the session passed TOTP
 
 
 class TokenService:
@@ -51,6 +52,7 @@ class TokenService:
         tid: uuid.UUID | None,
         ttl_s: int,
         jti: uuid.UUID | None = None,
+        mfa: bool = False,
     ) -> tuple[str, TokenClaims]:
         if aud == "tenant" and tid is None:
             raise ValueError("tenant tokens require tid")
@@ -58,7 +60,15 @@ class TokenService:
             raise ValueError("platform tokens must not carry tid")
         now = int(time.time())
         claims = TokenClaims(
-            sub=sub, sid=sid, jti=jti or uuid.uuid4(), typ=typ, aud=aud, tid=tid, exp=now + ttl_s, iat=now
+            sub=sub,
+            sid=sid,
+            jti=jti or uuid.uuid4(),
+            typ=typ,
+            aud=aud,
+            tid=tid,
+            exp=now + ttl_s,
+            iat=now,
+            mfa=mfa,
         )
         payload: dict[str, Any] = {
             "iss": self._s.jwt_issuer,
@@ -73,6 +83,8 @@ class TokenService:
         }
         if tid is not None:
             payload["tid"] = str(tid)
+        if aud == "platform":
+            payload["mfa"] = mfa
         kid = self._s.jwt_active_kid
         token = jwt.encode(payload, self._keys[kid], algorithm=ALGORITHM, headers={"kid": kid})
         return token, claims
@@ -113,6 +125,7 @@ class TokenService:
                 tid=tid,
                 exp=int(payload["exp"]),
                 iat=int(payload["iat"]),
+                mfa=payload.get("mfa") is True,
             )
         except (ValueError, TypeError, KeyError) as e:
             raise Unauthorized("Invalid token.") from e

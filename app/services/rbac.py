@@ -33,6 +33,7 @@ from app.models import (
     AuthSession,
     RowScope,
 )
+from app.models.rbac import ADMIN_RESOURCES
 from app.security.identifiers import IDENTIFIER_RE
 from app.security.passwords import hash_password, validate_password_policy
 from app.services.audit import AuditContext, record
@@ -96,8 +97,8 @@ class RbacService:
             if spec.action == Action.manage:
                 raise ValidationFailed("'manage' is not a data action.")
         else:
-            if spec.action not in (Action.manage, Action.read):
-                raise ValidationFailed("Non-data resources support 'read' and 'manage' only.")
+            if spec.resource in ADMIN_RESOURCES and spec.action not in (Action.manage, Action.read):
+                raise ValidationFailed("Administrative resources support 'read' and 'manage' only.")
             if (
                 spec.readable_fields is not None
                 or spec.writable_fields is not None

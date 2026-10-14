@@ -9,12 +9,20 @@ from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
 from sqlalchemy import select
 
-from app.api.deps import client_ip, container, login_rate_limit, platform_admin, platform_audit_ctx
+from app.api.deps import (
+    client_ip,
+    container,
+    login_rate_limit,
+    platform_admin,
+    platform_audit_ctx,
+    platform_claims,
+)
 from app.container import Container
 from app.core.errors import NotFound, ValidationFailed
 from app.core.logging import request_id_var
 from app.dynamic.schema import TableSpec
 from app.models import AppTenant, TenantStatus
+from app.security.tokens import TokenClaims
 from app.services.authz import PlatformPrincipal
 
 router = APIRouter(tags=["platform"])
@@ -24,6 +32,12 @@ class PlatformLoginIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
     email: EmailStr
     password: str = Field(..., min_length=1, max_length=256)
+    otp: str | None = Field(None, pattern=r"^[0-9]{6}$")
+
+
+class MfaConfirmIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    code: str = Field(..., pattern=r"^[0-9]{6}$")
 
 
 class TenantCreateIn(BaseModel):
@@ -58,17 +72,39 @@ async def platform_login(
 ) -> dict[str, Any]:
     await login_rate_limit(request, f"platform:{body.email}", c)
     pair = await c.auth.platform_login(
-        email=str(body.email), password=body.password, ip=client_ip(request), request_id=request_id_var.get()
+        email=str(body.email),
+        password=body.password,
+        otp=body.otp,
+        ip=client_ip(request),
+        request_id=request_id_var.get(),
     )
     return {"access_token": pair.access_token, "token_type": pair.token_type, "expires_in": pair.expires_in}
 
 
 @router.post("/platform/auth/logout", status_code=204)
 async def platform_logout(
-    request: Request, c: Container = Depends(container), _: PlatformPrincipal = Depends(platform_admin)
+    claims: TokenClaims = Depends(platform_claims), c: Container = Depends(container)
 ) -> None:
-    token = request.headers["Authorization"].partition(" ")[2]
-    await c.auth.platform_logout(c.tokens.verify(token, expected_typ="access", expected_aud="platform"))
+    await c.auth.platform_logout(claims)
+
+
+@router.post("/platform/auth/mfa/setup")
+async def mfa_setup(
+    claims: TokenClaims = Depends(platform_claims), c: Container = Depends(container)
+) -> dict[str, str]:
+    # The secret is returned once so it can be added to an authenticator app; it is stored encrypted.
+    return await c.auth.mfa_setup(claims)
+
+
+@router.post("/platform/auth/mfa/confirm")
+async def mfa_confirm(
+    body: MfaConfirmIn,
+    request: Request,
+    claims: TokenClaims = Depends(platform_claims),
+    c: Container = Depends(container),
+) -> dict[str, Any]:
+    pair = await c.auth.mfa_confirm(claims, body.code, ip=client_ip(request), request_id=request_id_var.get())
+    return {"access_token": pair.access_token, "token_type": pair.token_type, "expires_in": pair.expires_in}
 
 
 @router.post("/platform/tenants", status_code=201)

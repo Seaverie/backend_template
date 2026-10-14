@@ -31,8 +31,10 @@ class Settings(BaseSettings):
     # Runtime connections use a non-superuser role WITHOUT BYPASSRLS.
     database_url: SecretStr
     # DDL connections (dynamic schema, migrations) use the schema-owner role. Only platform-admin
-    # endpoints ever touch this engine.
-    ddl_database_url: SecretStr
+    # endpoints ever touch this engine. Leave unset (and TC_ENABLE_PLATFORM_ROUTES=false) on
+    # request-serving deployments so the owner credential never reaches them.
+    ddl_database_url: SecretStr | None = None
+    enable_platform_routes: bool = True
     # Name of the runtime role that dynamic DDL grants DML to (must match the role in database_url).
     app_db_role: str = Field("tc_app", pattern=r"^[a-z_][a-z0-9_]{0,62}$")
     db_pool_size: int = Field(10, ge=1, le=200)
@@ -65,7 +67,13 @@ class Settings(BaseSettings):
     refresh_ttl_s: int = Field(14 * 24 * 3600, ge=3600)
     platform_access_ttl_s: int = Field(900, ge=60, le=3600)
 
+    # Pepper keyring for API key digests. ``api_key_pepper`` is pepper id "p1"; additional peppers may
+    # be listed in ``api_key_peppers`` ({"p2": "..."}) and selected with ``api_key_active_pepper``.
+    # Keys verify with the pepper recorded on their row, so rotating the active pepper never breaks
+    # existing keys; they move to the new pepper when rotated.
     api_key_pepper: SecretStr
+    api_key_peppers: dict[str, SecretStr] = Field(default_factory=dict)
+    api_key_active_pepper: str = "p1"
     api_key_cache_ttl_s: int = Field(60, ge=5, le=600)
     api_key_tombstone_ttl_s: int = Field(3600, ge=60)
 
@@ -75,6 +83,39 @@ class Settings(BaseSettings):
 
     max_failed_logins: int = Field(10, ge=3)
     lockout_s: int = Field(900, ge=60)
+    # Platform-admin TOTP. Defaults to required in production.
+    platform_mfa_required: bool | None = None
+
+    # --- Envelope encryption (provider credentials, tenant DB credentials, MFA secrets) -----------
+    kms_provider: Literal["local", "vault", "aws"] = "local"
+    # local: base64 of 32 random bytes. Development/test only unless explicitly allowed.
+    kms_local_kek: SecretStr | None = None
+    kms_allow_local_in_production: bool = False
+    vault_addr: str | None = None
+    vault_token: SecretStr | None = None
+    vault_transit_key: str = "tenantcore"
+    vault_namespace: str | None = None
+    aws_kms_key_id: str | None = None
+    aws_region: str | None = None
+    dek_cache_ttl_s: int = Field(300, ge=0, le=3600)
+
+    # --- Outbound integrations -------------------------------------------------------------------
+    outbound_timeout_s: float = Field(10.0, gt=0, le=60)
+    outbound_max_response_bytes: int = Field(1_048_576, ge=1024)
+    sandbox_payments_enabled: bool | None = None  # defaults to False in production
+    provider_cache_ttl_s: int = Field(300, ge=10, le=3600)
+    maps_cache_ttl_s: int = Field(3600, ge=0, le=86_400)
+
+    # --- Dedicated (enterprise) tenant databases ---------------------------------------------------
+    # CIDRs a tenant database host may resolve to. Empty = dedicated databases disabled.
+    tenant_db_allowed_networks: list[str] = Field(default_factory=list)
+    tenant_db_max_engines: int = Field(50, ge=1, le=1000)
+    tenant_db_pool_size: int = Field(3, ge=1, le=20)
+    tenant_db_idle_dispose_s: int = Field(900, ge=60)
+
+    # --- Analytics -------------------------------------------------------------------------------
+    analytics_statement_timeout_ms: int = Field(3000, ge=100, le=60_000)
+    analytics_max_days: int = Field(366, ge=1, le=3660)
 
     # --- Caching ---------------------------------------------------------------------------------
     perm_cache_ttl_s: int = Field(300, ge=10, le=3600)
@@ -100,9 +141,9 @@ class Settings(BaseSettings):
     # When Redis is unreachable each instance enforces limit / divisor locally (approximate).
     rl_local_fallback_divisor: int = Field(4, ge=1)
 
-    @field_validator("jwt_keys", mode="before")
+    @field_validator("jwt_keys", "api_key_peppers", mode="before")
     @classmethod
-    def _parse_jwt_keys(cls, v: Any) -> Any:
+    def _parse_json_map(cls, v: Any) -> Any:
         if isinstance(v, str):
             return json.loads(v)
         return v
@@ -120,16 +161,51 @@ class Settings(BaseSettings):
         for kid, secret in self.jwt_keys.items():
             if len(secret.get_secret_value().encode()) < _MIN_SECRET_BYTES:
                 raise ValueError(f"JWT key {kid!r} must be at least {_MIN_SECRET_BYTES} bytes")
-        if len(self.api_key_pepper.get_secret_value().encode()) < _MIN_SECRET_BYTES:
-            raise ValueError(f"TC_API_KEY_PEPPER must be at least {_MIN_SECRET_BYTES} bytes")
+        for pid, pep in self.pepper_keyring.items():
+            if len(pep.encode()) < _MIN_SECRET_BYTES:
+                raise ValueError(f"API key pepper {pid!r} must be at least {_MIN_SECRET_BYTES} bytes")
+        if self.api_key_active_pepper not in self.pepper_keyring:
+            raise ValueError("TC_API_KEY_ACTIVE_PEPPER must name a configured pepper")
+        if self.enable_platform_routes and self.ddl_database_url is None:
+            raise ValueError("TC_DDL_DATABASE_URL is required when platform routes are enabled")
+        if (
+            self.kms_provider == "local"
+            and self.environment == "production"
+            and not self.kms_allow_local_in_production
+        ):
+            raise ValueError("the local KMS provider is not allowed in production; use vault or aws")
+        if self.kms_provider == "vault" and not (self.vault_addr and self.vault_token):
+            raise ValueError("vault KMS requires TC_VAULT_ADDR and TC_VAULT_TOKEN")
+        if self.kms_provider == "aws" and not self.aws_kms_key_id:
+            raise ValueError("aws KMS requires TC_AWS_KMS_KEY_ID")
         if self.rl_tenant_default_per_min > self.rl_tenant_max_per_min:
             raise ValueError("default tenant rate limit exceeds platform maximum")
         if self.environment == "production":
             secrets = [s.get_secret_value() for s in self.jwt_keys.values()]
-            secrets.append(self.api_key_pepper.get_secret_value())
+            secrets.extend(self.pepper_keyring.values())
             if any(_DEV_MARKER in s for s in secrets):
                 raise ValueError("development secrets must not be used in production")
         return self
+
+    @property
+    def pepper_keyring(self) -> dict[str, str]:
+        ring = {"p1": self.api_key_pepper.get_secret_value()}
+        ring.update({k: v.get_secret_value() for k, v in self.api_key_peppers.items()})
+        return ring
+
+    @property
+    def mfa_required(self) -> bool:
+        return (
+            self.environment == "production"
+            if self.platform_mfa_required is None
+            else self.platform_mfa_required
+        )
+
+    @property
+    def sandbox_payments(self) -> bool:
+        if self.sandbox_payments_enabled is None:
+            return self.environment != "production"
+        return self.sandbox_payments_enabled and self.environment != "production"
 
 
 @lru_cache(maxsize=1)

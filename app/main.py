@@ -5,7 +5,17 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from app.api.routers import api_keys, auth, data, health, platform, tenant_admin
+from app.api.routers import (
+    api_keys,
+    auth,
+    catalog,
+    commerce,
+    data,
+    health,
+    integrations,
+    platform,
+    tenant_admin,
+)
 from app.container import Container
 from app.core.config import Settings, get_settings
 from app.core.errors import install_error_handlers
@@ -44,6 +54,16 @@ def create_app(settings: Settings | None = None, container: Container | None = N
     app.add_middleware(RequestContextMiddleware, max_body_bytes=settings.max_request_bytes)
 
     app.include_router(health.router)
-    for r in (auth.router, platform.router, api_keys.router, tenant_admin.router, data.router):
+    for r in (
+        auth.router,
+        api_keys.router,
+        tenant_admin.router,
+        data.router,
+        catalog.router,
+        commerce.router,
+        integrations.router,
+    ):
         app.include_router(r, prefix=settings.api_prefix)
+    if settings.enable_platform_routes:
+        app.include_router(platform.router, prefix=settings.api_prefix)
     return app

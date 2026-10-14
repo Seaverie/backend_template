@@ -12,8 +12,9 @@ from collections.abc import Awaitable, Callable
 from fastapi import Depends, Request
 
 from app.container import Container
-from app.core.errors import RateLimited, Unauthorized, ValidationFailed
+from app.core.errors import Forbidden, RateLimited, Unauthorized, ValidationFailed
 from app.core.logging import request_id_var, tenant_id_var
+from app.security.tokens import TokenClaims
 from app.services.audit import AuditContext
 from app.services.authz import PlatformPrincipal, Principal
 from app.services.ratelimit import Bucket
@@ -116,13 +117,27 @@ async def login_rate_limit(request: Request, account_key: str, c: Container) -> 
         raise RateLimited(headers={"Retry-After": str(decision.retry_after_s)})
 
 
-async def platform_admin(request: Request, c: Container = Depends(container)) -> PlatformPrincipal:
+async def platform_claims(request: Request, c: Container = Depends(container)) -> TokenClaims:
+    """Valid platform session, MFA not yet required. Used only by the MFA enrollment endpoints."""
     token = _bearer(request)
     if not token:
         raise Unauthorized()
     claims = c.tokens.verify(token, expected_typ="access", expected_aud="platform")
     if not await c.auth.platform_session_is_valid(claims):
         raise Unauthorized("Session revoked.")
+    decision = await c.limiter.check(
+        [Bucket("platform", c.settings.rl_platform_per_min), Bucket(f"platform_admin:{claims.sub}", 600)]
+    )
+    if not decision.allowed:
+        raise RateLimited(headers={"Retry-After": str(decision.retry_after_s)})
+    return claims
+
+
+async def platform_admin(
+    claims: TokenClaims = Depends(platform_claims), c: Container = Depends(container)
+) -> PlatformPrincipal:
+    if c.settings.mfa_required and not claims.mfa:
+        raise Forbidden("MFA is required for platform administration. Enroll at /platform/auth/mfa/setup.")
     return PlatformPrincipal(claims.sub, claims.sid)
 
 

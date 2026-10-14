@@ -14,6 +14,7 @@ from app.db.session import Database
 from app.models import AppRole, AppTenant, AppUser, TenantStatus
 from app.security.passwords import hash_password, validate_password_policy
 from app.services.audit import AuditContext, record
+from app.services.orders import seed_default_statuses
 
 
 @dataclass(frozen=True, slots=True)
@@ -107,6 +108,7 @@ class TenantService:
                 )
             )
             await s.flush()
+            await seed_default_statuses(s, tenant.id)
             await record(
                 s,
                 ctx,

@@ -34,6 +34,8 @@ class TenantApiKey(Base):
     key_id: Mapped[str] = mapped_column(String(20), nullable=False, unique=True)
     name: Mapped[str] = mapped_column(String(100), nullable=False)
     digest: Mapped[bytes] = mapped_column(LargeBinary(32), nullable=False)
+    # Which pepper produced ``digest`` (see Settings.pepper_keyring).
+    pepper_id: Mapped[str] = mapped_column(String(16), nullable=False, server_default="p1")
     scopes: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False)
     created_by_user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

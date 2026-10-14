@@ -26,6 +26,15 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base, TimestampMixin, tenant_fk, uuid_pk
 
+# Built-in (non-dynamic) resources.
+#   ADMIN_RESOURCES support only "read" and "manage".
+#   DOMAIN_RESOURCES support create/read/update/delete/manage (manage = privileged operations such as
+#   stock adjustments, PO receiving, RMA approval/refund, provider configuration).
+ADMIN_RESOURCES = ("users", "roles", "api_keys", "audit_logs", "settings", "analytics")
+DOMAIN_RESOURCES = ("products", "inventory", "purchasing", "orders", "rma", "payments", "maps")
+BUILTIN_RESOURCES = ADMIN_RESOURCES + DOMAIN_RESOURCES
+RESOURCE_REGEX = r"^(data\.[a-z][a-z0-9_]{0,62}|" + "|".join(BUILTIN_RESOURCES) + r")$"
+
 
 class Action(enum.StrEnum):
     create = "create"
@@ -71,10 +80,7 @@ class AppPermission(Base, TimestampMixin):
 
     __table_args__ = (
         UniqueConstraint("tenant_id", "id"),
-        CheckConstraint(
-            r"resource ~ '^(data\.[a-z][a-z0-9_]{0,62}|users|roles|api_keys|audit_logs)$'",
-            name="resource_format",
-        ),
+        CheckConstraint(f"resource ~ '{RESOURCE_REGEX}'", name="resource_format"),
         Index("ix_app_permissions_tenant_resource", "tenant_id", "resource"),
     )
 
