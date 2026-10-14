@@ -31,9 +31,11 @@ services:
 
   migrate:
     build: .
-    command: ["alembic", "upgrade", "head"]
+    # Migrate, then create the platform admin from TC_SEED_ADMIN_* in .env (skipped if unset or present).
+    command: ["sh", "-c", "alembic upgrade head && python -m app.cli seed"]
     env_file: .env
     environment:
+      TC_DATABASE_URL: postgresql+asyncpg://tc_app:${TC_APP_PASSWORD}@postgres:5432/tenantcore
       TC_DDL_DATABASE_URL: postgresql+asyncpg://tc_owner:${TC_OWNER_PASSWORD}@postgres:5432/tenantcore
     depends_on:
       postgres: {condition: service_healthy}
