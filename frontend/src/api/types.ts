@@ -25,6 +25,7 @@ export interface Role { id: string; name: string; description?: string | null; p
 export interface Webhook { id: string; url: string; description: string | null; event_types: string[]; is_active: boolean; consecutive_failures: number; disabled_reason: string | null; secret_version: number; created_at: string }
 export interface WebhookDelivery { id: string; event_id: string; event_type: string; status: 'pending' | 'succeeded' | 'dead'; attempts: number; next_attempt_at: string | null; last_status_code: number | null; last_error: string | null; delivered_at: string | null; created_at: string }
 
-export interface Tenant { id: string; slug: string; name: string; status: 'active' | 'suspended' | 'offboarding'; isolation_mode: 'shared' | 'dedicated'; rate_limit_per_min: number; created_at?: string; user_count?: number }
+export interface Tenant { id: string; slug: string; name: string; status: 'active' | 'suspended' | 'offboarding'; isolation_mode: 'shared' | 'dedicated'; rate_limit_per_min: number | null; created_at?: string; user_count?: number }
 export interface TenantDatabase { tenant_id: string; dialect: string; host: string; port: number; database: string; ssl_mode: string; status: string; secret_version: number; synced_schema_version: number | null; platform_schema_version?: number }
+export interface DeadLetter { id: string; tenant_id: string | null; source: string; reference_id: string; task_name: string | null; error: string; created_at: string }
 export interface Task { id: string; kind: string; status: 'queued' | 'running' | 'succeeded' | 'failed'; progress: Record<string, unknown>; result: Record<string, unknown> | null; error: string | null; created_at: string }

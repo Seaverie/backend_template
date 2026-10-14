@@ -17,6 +17,7 @@ const confirm = ref('')
 const drop = ref(false)
 const msg = ref<{ tone: 'ok' | 'err'; text: string } | null>(null)
 const busy = ref('')
+const deadLetters = ref<number | null>(null)
 
 async function pick(t: Tenant) {
   selected.value = t; confirm.value = ''; drop.value = false; msg.value = null
@@ -36,30 +37,35 @@ async function offboard() {
     tenants.value = (await api.tenants()).items
   } catch (e) { msg.value = { tone: 'err', text: e instanceof Error ? e.message : 'Request failed.' } } finally { busy.value = '' }
 }
-onMounted(async () => { tenants.value = (await api.tenants()).items; const g = tenants.value.find((t) => t.isolation_mode === 'dedicated'); if (g) await pick(g) })
+onMounted(async () => {
+  api.deadLetters().then((r) => { deadLetters.value = r.items.length }).catch(() => { deadLetters.value = null })
+  tenants.value = (await api.tenants()).items; const g = tenants.value.find((t) => t.isolation_mode === 'dedicated'); if (g) await pick(g) })
 
 const counts = computed(() => ({
   total: tenants.value.length, active: tenants.value.filter((t) => t.status === 'active').length,
+  inactive: tenants.value.filter((t) => t.status !== 'active').length,
   dedicated: tenants.value.filter((t) => t.isolation_mode === 'dedicated').length,
 }))
 const inSync = computed(() => !db.value || db.value.synced_schema_version === db.value.platform_schema_version)
-const columns: Column[] = [
+// The tenant list endpoint has no user count; show the column only when the data has one.
+const columns = computed<Column[]>(() => [
   { key: 'name', label: 'Tenant', primary: true }, { key: 'iso', label: 'Isolation' }, { key: 'status', label: 'Status' },
-  { key: 'rl', label: 'Rate limit', align: 'right', hideOnMobile: true }, { key: 'users', label: 'Users', align: 'right', hideOnMobile: true },
-]
+  { key: 'rl', label: 'Rate limit', align: 'right', hideOnMobile: true },
+  ...(tenants.value.some((t) => t.user_count !== undefined) ? [{ key: 'users', label: 'Users', align: 'right' as const, hideOnMobile: true }] : []),
+])
 </script>
 
 <template>
   <div class="page">
     <div class="page-header">
-      <div class="titles"><h1>Tenants</h1><p class="muted">GET /platform/tenants · platform admin, MFA verified</p></div>
+      <div class="titles"><h1>Tenants</h1><p class="muted">GET /platform/tenants · platform admin</p></div>
       <div class="actions"><UiButton>Export schema snapshot</UiButton><UiButton variant="primary" icon="plus">New tenant</UiButton></div>
     </div>
     <div class="stats">
       <StatCard label="Tenants" :value="String(counts.total)" :note="`${counts.active} active`" />
-      <StatCard label="Dedicated databases" :value="String(counts.dedicated)" note="PostgreSQL" />
-      <StatCard label="Dead letters" value="2" note="GET /platform/dead-letters" />
-      <StatCard label="Background tasks" value="1 running" note="Imports, offboarding, deliveries" />
+      <StatCard label="Dedicated databases" :value="String(counts.dedicated)" note="Enterprise tenants with their own database" />
+      <StatCard label="Dead letters" :value="deadLetters === null ? '—' : String(deadLetters)" note="Failed jobs waiting for a retry" />
+      <StatCard label="Suspended or offboarding" :value="String(counts.inactive)" note="Tenants that cannot sign in" />
     </div>
 
     <UiCard title="All tenants" caption="Shared tenants are isolated by row-level security; dedicated tenants have their own database">
@@ -67,7 +73,7 @@ const columns: Column[] = [
         <template #cell-name="{ row }"><strong>{{ row.name }}</strong><div class="caption">{{ row.slug }}</div></template>
         <template #cell-iso="{ row }"><UiBadge :tone="row.isolation_mode === 'dedicated' ? 'brand' : 'neutral'">{{ title(row.isolation_mode) }}</UiBadge></template>
         <template #cell-status="{ row }"><UiBadge :tone="tenantTone[row.status]">{{ title(row.status) }}</UiBadge></template>
-        <template #cell-rl="{ row }">{{ number(row.rate_limit_per_min) }} / min</template>
+        <template #cell-rl="{ row }">{{ row.rate_limit_per_min ? `${number(row.rate_limit_per_min)} / min` : 'Default' }}</template>
         <template #cell-users="{ row }">{{ row.user_count }}</template>
       </DataTable>
     </UiCard>

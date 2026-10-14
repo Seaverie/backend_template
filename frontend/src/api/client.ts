@@ -1,7 +1,7 @@
 import { clearSession, saveSession, session } from './session'
 import { mock } from './mock'
 import type {
-  Lifecycle, Order, OrderDetail, Page, Role, SalesRow, StockLevel, Task, Tenant, TenantDatabase, TokenPair, User, Webhook, WebhookDelivery,
+  DeadLetter, Lifecycle, Order, OrderDetail, Page, Role, SalesRow, StockLevel, Task, Tenant, TenantDatabase, TokenPair, User, Webhook, WebhookDelivery,
 } from './types'
 
 export const BASE = import.meta.env.VITE_API_BASE ?? '/api/v1'
@@ -64,6 +64,7 @@ const live = {
   redeliver: (id: string) => send<void>('POST', `/webhook-deliveries/${id}/redeliver`),
   rotateSecret: (id: string) => send<{ signing_secret: string }>('POST', `/webhooks/${id}/rotate-secret`),
   tenants: () => get<Page<Tenant>>('/platform/tenants'),
+  deadLetters: () => get<Page<DeadLetter>>('/platform/dead-letters?limit=500'),
   tenantDb: (id: string) => get<TenantDatabase>(`/platform/tenants/${id}/database`),
   syncTenantDb: (id: string) => send<TenantDatabase>('POST', `/platform/tenants/${id}/database/sync`),
   offboard: (id: string, confirmSlug: string, dropDedicatedData: boolean) =>

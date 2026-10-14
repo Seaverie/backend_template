@@ -115,6 +115,10 @@ export const mock: Api = {
   redeliver: async (id) => { const d = deliveries.find((x) => x.id === id); if (d) { d.status = 'pending'; d.attempts = 0; d.next_attempt_at = new Date().toISOString() } return wait(undefined) },
   rotateSecret: async (id) => { const h = hooks.find((x) => x.id === id); if (h) h.secret_version += 1; return wait({ signing_secret: 'whsec_' + crypto.randomUUID().replace(/-/g, '') }) },
   tenants: async () => wait({ items: tenants }),
+  deadLetters: async () => wait({ items: [
+    { id: 'dl1', tenant_id: 't0', source: 'webhook', reference_id: 'd3', task_name: null, error: 'HTTP 500', created_at: iso(2) },
+    { id: 'dl2', tenant_id: 't1', source: 'task', reference_id: 'task9', task_name: 'tenantcore.run_import', error: 'ValueError: bad row', created_at: iso(1) },
+  ] }),
   tenantDb: async (id) => wait({
     tenant_id: id, dialect: 'postgresql', host: id === 't2' ? 'db-umbrella.internal' : 'db-globex.internal', port: 5432, database: 'tenant', ssl_mode: 'verify-full',
     status: 'active', secret_version: 3, synced_schema_version: id === 't2' ? 40 : 42, platform_schema_version: 42,
