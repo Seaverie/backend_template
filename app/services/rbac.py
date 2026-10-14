@@ -154,10 +154,21 @@ class RbacService:
         return user
 
     async def list_users(self, principal: Principal) -> list[AppUser]:
+        users, _ = await self.list_users_with_roles(principal)
+        return users
+
+    async def list_users_with_roles(
+        self, principal: Principal
+    ) -> tuple[list[AppUser], dict[uuid.UUID, list[str]]]:
+        """Users (max 500) plus each user's role ids, in one tenant transaction."""
         if principal.grant("users", Action.read) is None:
             principal.require("users", Action.manage)
         async with self._db.tenant_session(principal.tenant_id, user_id=principal.user_id) as s:
-            return list((await s.execute(select(AppUser).order_by(AppUser.created_at).limit(500))).scalars())
+            users = list((await s.execute(select(AppUser).order_by(AppUser.created_at).limit(500))).scalars())
+            roles: dict[uuid.UUID, list[str]] = {}
+            for uid, rid in (await s.execute(select(AppUserRole.user_id, AppUserRole.role_id))).all():
+                roles.setdefault(uid, []).append(str(rid))
+        return users, roles
 
     async def update_user(
         self,

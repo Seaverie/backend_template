@@ -553,6 +553,13 @@ async def test_rma_full_flow(
     assert [e["to_status"] for e in events] == ["requested", "approved", "received", "refunded"]
     assert (await client.post(act, headers=s.t.h, json={"action": "close"})).json()["status"] == "closed"
 
+    # Listing: filtered by order, newest first, and scoped to the tenant.
+    listed = (await client.get(f"{P}/returns", params={"order_id": oid}, headers=s.t.h)).json()["items"]
+    assert [x["id"] for x in listed] == [rma] and listed[0]["status"] == "closed"
+    assert rma in [x["id"] for x in (await client.get(f"{P}/returns", headers=s.t.h)).json()["items"]]
+    other = await make_shop(stock=1, price="1.00")
+    assert (await client.get(f"{P}/returns", headers=other.t.h)).json()["items"] == []
+
 
 # -- analytics & catalog ----------------------------------------------------------------------------------
 

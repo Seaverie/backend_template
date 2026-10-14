@@ -1,31 +1,40 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { api, USE_MOCKS } from '@/api/client'
 import { clearSession, session } from '@/api/session'
+import type { Me } from '@/api/types'
+import { platformNav, tenantNav, type NavItem } from '@/nav'
 import AppIcon from './AppIcon.vue'
 import UiBadge from './UiBadge.vue'
 
 const route = useRoute()
 const router = useRouter()
 const open = ref(false)
-watch(() => route.fullPath, () => { open.value = false })
-
-const tenantNav = [
-  { to: '/', label: 'Dashboard', icon: 'dashboard' }, { to: '/orders', label: 'Orders', icon: 'orders' },
-  { to: '/users', label: 'Users & roles', icon: 'users' }, { to: '/webhooks', label: 'Webhooks', icon: 'webhook' },
-]
-const tenantLater = [
-  { label: 'Catalog & stock', icon: 'package' }, { label: 'Data tables', icon: 'database' }, { label: 'Imports', icon: 'import' },
-  { label: 'API keys', icon: 'key' }, { label: 'Audit log', icon: 'audit' },
-]
-const platformNav = [{ to: '/platform/tenants', label: 'Tenants', icon: 'tenants' }]
-const platformLater = [{ label: 'Schema & tables', icon: 'database' }, { label: 'Background tasks', icon: 'refresh' }, { label: 'Dead letters', icon: 'audit' }]
+watch(() => route.fullPath, () => { open.value = false; query.value = '' })
 
 const isPlatform = computed(() => session.audience === 'platform')
-const nav = computed(() => (isPlatform.value ? platformNav : tenantNav))
-const later = computed(() => (isPlatform.value ? platformLater : tenantLater))
+const groups = computed(() => (isPlatform.value ? platformNav : tenantNav))
 const initials = computed(() => (session.email ?? 'U').slice(0, 2).toUpperCase())
+const me = ref<Me | null>(null)
+onMounted(async () => { if (!isPlatform.value) me.value = await api.me().catch(() => null) })
+const roleLabel = computed(() => (isPlatform.value ? 'Platform admin' : me.value ? (me.value.is_tenant_admin ? 'Tenant admin' : 'Member') : ''))
+
+// "Jump to" search over the pages in the menu.
+const query = ref('')
+const active = ref(0)
+const results = computed<NavItem[]>(() => {
+  const q = query.value.trim().toLowerCase()
+  if (!q) return []
+  return groups.value.flatMap((g) => g.items).filter((i) => `${i.label} ${i.keywords ?? ''}`.toLowerCase().includes(q)).slice(0, 6)
+})
+watch(query, () => { active.value = 0 })
+function go(i?: NavItem) { const t = i ?? results.value[active.value]; if (t) router.push(t.to) }
+function onSearchKey(e: KeyboardEvent) {
+  if (e.key === 'ArrowDown') { active.value = Math.min(active.value + 1, results.value.length - 1); e.preventDefault() }
+  else if (e.key === 'ArrowUp') { active.value = Math.max(active.value - 1, 0); e.preventDefault() }
+  else if (e.key === 'Escape') query.value = ''
+}
 
 async function signOut() {
   try { await api.logout() } catch { /* already signed out server-side */ }
@@ -44,17 +53,17 @@ async function signOut() {
         <div class="wordmark"><strong>TenantCore</strong><span>{{ isPlatform ? 'Platform admin' : session.tenant }}</span></div>
         <button class="icon-btn close" type="button" aria-label="Close menu" @click="open = false"><AppIcon name="close" /></button>
       </div>
-      <p class="section">MENU</p>
-      <RouterLink v-for="n in nav" :key="n.to" :to="n.to" class="nav-item" :class="{ active: route.path === n.to }"
-                  :aria-current="route.path === n.to ? 'page' : undefined">
-        <AppIcon :name="n.icon" /><span>{{ n.label }}</span>
-      </RouterLink>
-      <p class="section">COMING NEXT</p>
-      <span v-for="n in later" :key="n.label" class="nav-item disabled" aria-disabled="true"><AppIcon :name="n.icon" /><span>{{ n.label }}</span></span>
+      <template v-for="g in groups" :key="g.title">
+        <p class="section">{{ g.title.toUpperCase() }}</p>
+        <RouterLink v-for="n in g.items" :key="n.to" :to="n.to" class="nav-item" :class="{ active: route.path === n.to }"
+                    :aria-current="route.path === n.to ? 'page' : undefined">
+          <AppIcon :name="n.icon" /><span>{{ n.label }}</span>
+        </RouterLink>
+      </template>
       <div class="grow" />
       <div class="user">
         <span class="avatar">{{ initials }}</span>
-        <div class="who"><strong>{{ session.email }}</strong><span>{{ isPlatform ? 'Platform admin' : 'Tenant admin' }}</span></div>
+        <div class="who"><strong>{{ session.email }}</strong><span>{{ roleLabel }}</span></div>
         <button class="icon-btn" type="button" aria-label="Sign out" title="Sign out" @click="signOut"><AppIcon name="logout" /></button>
       </div>
     </nav>
@@ -62,12 +71,20 @@ async function signOut() {
     <div class="main">
       <header class="topbar">
         <button class="icon-btn menu" type="button" aria-label="Open menu" :aria-expanded="open" @click="open = true"><AppIcon name="menu" /></button>
-        <label class="search"><AppIcon name="search" :size="16" /><span class="sr-only">Search</span>
-          <input type="search" placeholder="Search orders, users, tables…" /></label>
+        <form class="search" role="search" @submit.prevent="go()">
+          <AppIcon name="search" :size="16" />
+          <label class="sr-only" for="jump">Jump to a page</label>
+          <input id="jump" v-model="query" type="search" placeholder="Jump to… (orders, keys, tables)" autocomplete="off"
+                 role="combobox" :aria-expanded="results.length > 0" aria-controls="jump-list" @keydown="onSearchKey" />
+          <ul v-if="results.length" id="jump-list" class="jump" role="listbox">
+            <li v-for="(r, i) in results" :key="r.to" role="option" :aria-selected="i === active" :class="{ on: i === active }"
+                @mousedown.prevent="go(r)" @mouseenter="active = i"><AppIcon :name="r.icon" :size="16" />{{ r.label }}</li>
+          </ul>
+        </form>
         <div class="grow" />
-        <UiBadge v-if="USE_MOCKS" tone="warning" title="Sample data: set VITE_USE_MOCKS=false to use the API">Demo data</UiBadge>
+        <UiBadge v-if="USE_MOCKS" tone="warning" title="Sample data kept in memory: set VITE_USE_MOCKS=false to use the API">Demo data</UiBadge>
         <UiBadge v-else tone="success" class="health">Live API</UiBadge>
-        <span class="avatar small" aria-hidden="true">{{ initials }}</span>
+        <button class="avatar small" type="button" :title="`Signed in as ${session.email}. Click to sign out.`" @click="signOut">{{ initials }}</button>
       </header>
       <main id="main" tabindex="-1"><slot /></main>
     </div>
@@ -91,8 +108,6 @@ async function signOut() {
 .nav-item { display: flex; align-items: center; gap: 12px; height: 40px; padding: 0 12px; border-radius: var(--radius-md); color: var(--text-sidebar); font-weight: 500; text-decoration: none; }
 .nav-item:hover { background: var(--bg-sidebar-active); color: #fff; text-decoration: none; }
 .nav-item.active { background: var(--bg-sidebar-active); color: #fff; }
-.nav-item.disabled { opacity: 0.45; cursor: default; }
-.nav-item.disabled:hover { background: none; color: var(--text-sidebar); }
 .grow { flex: 1; }
 .user { display: flex; align-items: center; gap: 10px; background: var(--bg-sidebar-active); border-radius: var(--radius-md); padding: 10px 12px; margin-top: 12px; }
 .who { display: flex; flex-direction: column; min-width: 0; flex: 1; font-size: 12px; }
@@ -104,9 +119,13 @@ async function signOut() {
 
 .main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 .topbar { position: sticky; top: env(safe-area-inset-top, 0px); z-index: 10; height: var(--topbar-height); display: flex; align-items: center; gap: 16px; padding: 0 32px; background: var(--bg-surface); border-bottom: 1px solid var(--border-default); }
-.search { display: flex; align-items: center; gap: 8px; width: min(360px, 100%); background: var(--bg-subtle); border-radius: var(--radius-md); padding: 0 12px; color: var(--text-secondary); }
+.search { position: relative; display: flex; align-items: center; gap: 8px; width: min(360px, 100%); background: var(--bg-subtle); border-radius: var(--radius-md); padding: 0 12px; color: var(--text-secondary); }
 .search input { border: 0; background: transparent; padding: 8px 0; width: 100%; font-size: 13px; outline: none; }
 .scrim { display: none; }
+.jump { position: absolute; top: calc(100% + 6px); left: 0; right: 0; z-index: 20; list-style: none; margin: 0; padding: 6px; background: var(--bg-surface); border: 1px solid var(--border-default); border-radius: var(--radius-md); box-shadow: var(--shadow-overlay); }
+.jump li { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-radius: var(--radius-sm); cursor: pointer; color: var(--text-primary); }
+.jump li.on { background: var(--brand-soft); color: var(--brand-primary); }
+button.avatar { border: 0; cursor: pointer; }
 
 @media (max-width: 1023px) {
   .sidebar { position: fixed; inset: 0 auto 0 0; z-index: 60; padding-top: calc(20px + env(safe-area-inset-top, 0px)); padding-bottom: calc(16px + env(safe-area-inset-bottom, 0px)); padding-left: calc(16px + env(safe-area-inset-left, 0px)); transform: translateX(-100%); transition: transform 0.2s ease; box-shadow: var(--shadow-overlay); }

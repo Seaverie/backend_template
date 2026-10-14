@@ -16,7 +16,7 @@ from app.core.errors import NotFound, ValidationFailed
 from app.dynamic import crud
 from app.dynamic.query import parse_list_query, readable_fields, validate_write
 from app.dynamic.schema import TableMeta
-from app.models import Action
+from app.models import Action, CrudMode
 from app.services.audit import record
 from app.services.authz import Grant, Principal
 from app.services.outbox import emit
@@ -101,6 +101,43 @@ async def _expand(
         found = {str(r._mapping["id"]): crud.serialize(r, cols) for r in (await session.execute(stmt)).all()}
         for i in items:
             i.setdefault("_expanded", {})[name] = found.get(i.get(name) or "")
+
+
+@router.get("")
+async def list_tables(
+    p: Principal = Depends(rate_limited()), c: Container = Depends(container)
+) -> dict[str, Any]:
+    """Tables the caller can use, with only the fields their role lets them read, and the actions
+    they may take. Tables without read access are omitted, as with every other data endpoint."""
+    out: list[dict[str, Any]] = []
+    for meta in await c.schema.all_tables():
+        if meta.crud_mode == CrudMode.disabled:
+            continue
+        read = p.grant(meta.resource, Action.read)
+        if read is None:
+            continue
+        actions = ["read"]
+        if meta.crud_mode == CrudMode.full:
+            actions += [
+                a.value for a in (Action.create, Action.update, Action.delete) if p.grant(meta.resource, a)
+            ]
+        write = p.grant(meta.resource, Action.update) or p.grant(meta.resource, Action.create)
+        fields = [
+            {**f, "writable": bool(write and write.can_write(f["name"]))}
+            for f in meta.to_json()["fields"]
+            if read.can_read(f["name"])
+        ]
+        out.append(
+            {
+                "name": meta.name,
+                "crud_mode": meta.crud_mode.value,
+                "require_idempotency": meta.require_idempotency,
+                "actions": actions,
+                "searchable": [f for f in meta.searchable if read.can_read(f)],
+                "fields": fields,
+            }
+        )
+    return {"items": out}
 
 
 @router.get("/{table_name}")
