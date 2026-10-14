@@ -1,0 +1,10 @@
+# Keep Linux line endings in the repo and in every checkout, including Windows.
+# Shell scripts run inside Linux containers; with CRLF endings they fail on the first line
+# ("env: 'bash\r': No such file or directory"), so Postgres never creates its roles.
+* text=auto eol=lf
+*.sh text eol=lf
+Dockerfile text eol=lf
+*.png binary
+*.jpg binary
+*.xlsx binary
+*.zip binary
