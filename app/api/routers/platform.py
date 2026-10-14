@@ -188,9 +188,16 @@ async def list_tables(
     _: PlatformPrincipal = Depends(platform_admin), c: Container = Depends(container)
 ) -> dict[str, Any]:
     tables = await c.schema.list_tables()
+    metas = {m.name: m for m in await c.schema.all_tables()}
     return {
         "items": [
-            {"id": str(t.id), "name": t.name, "crud_mode": t.crud_mode.value, "version": t.version}
+            {
+                "id": str(t.id),
+                "name": t.name,
+                "crud_mode": t.crud_mode.value,
+                "version": t.version,
+                "fields": metas[t.name].to_json()["fields"] if t.name in metas else [],
+            }
             for t in tables
         ]
     }

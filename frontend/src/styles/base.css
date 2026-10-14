@@ -42,3 +42,24 @@ a:hover { text-decoration: underline; }
 }
 @media (max-width: 359px) { .stats { grid-template-columns: minmax(0, 1fr); } }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
+
+/* Forms, toolbars and tabs shared by the views */
+.grid2 { display: grid; gap: 14px; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.grid3 { display: grid; gap: 14px; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+@media (max-width: 639px) { .grid2, .grid3 { grid-template-columns: minmax(0, 1fr); } }
+.toolbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; padding: 0 24px 16px; }
+.toolbar .search-input { flex: 1 1 220px; min-width: 0; padding: 8px 12px; border: 1px solid var(--border-strong); border-radius: var(--radius-md); background: var(--bg-surface); font-size: 14px; }
+.row-actions { display: flex; gap: 4px; justify-content: flex-end; flex-wrap: wrap; }
+.tabs { display: flex; gap: 8px; overflow-x: auto; scrollbar-width: none; margin: 0 -4px; padding: 0 4px; }
+.tab { border: 1px solid transparent; background: none; padding: 8px 14px; border-radius: var(--radius-md); color: var(--text-secondary); font-weight: 500; cursor: pointer; white-space: nowrap; min-height: 36px; }
+.tab.on { background: var(--bg-surface); border-color: var(--border-strong); color: var(--text-primary); }
+.chips { display: flex; gap: 6px; flex-wrap: wrap; }
+.chip { display: inline-flex; align-items: center; padding: 2px 8px; border-radius: var(--radius-full); background: var(--bg-subtle); font-size: 12px; line-height: 18px; white-space: nowrap; }
+.secret-out { display: flex; gap: 8px; align-items: center; background: var(--bg-subtle); border: 1px dashed var(--border-strong); border-radius: var(--radius-md); padding: 10px 12px; }
+.secret-out code { flex: 1; font-family: var(--font-mono); font-size: 13px; overflow-wrap: anywhere; }
+.note { padding: 10px 12px; border-radius: var(--radius-md); background: var(--info-bg); color: var(--info); font-size: 13px; }
+.note.warn { background: var(--warning-bg); color: var(--warning); }
+.note.danger { background: var(--danger-bg); color: var(--danger); }
+.section-label { font-size: 12px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--text-secondary); }
+.card-body { padding: 0 24px 20px; display: grid; gap: 14px; }
+@media (max-width: 767px) { .toolbar { padding: 0 16px 14px; } .card-body { padding: 0 16px 16px; } }

@@ -289,6 +289,23 @@ async def create_rma(
     return _rma(await c.rma.get(p, rma.id))
 
 
+@router.get("/returns")
+async def list_rmas(
+    order_id: uuid.UUID | None = None,
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0, le=10_000),
+    p: Principal = Depends(rate_limited()),
+    c: Container = Depends(container),
+) -> dict[str, Any]:
+    rows = await c.rma.list_rmas(p, order_id=order_id, limit=limit, offset=offset)
+    return {
+        "items": [
+            pick(r, "id", "number", "order_id", "status", "reason", "refund_amount", "created_at")
+            for r in rows
+        ]
+    }
+
+
 @router.get("/returns/{rma_id}")
 async def get_rma(
     rma_id: uuid.UUID, p: Principal = Depends(rate_limited()), c: Container = Depends(container)

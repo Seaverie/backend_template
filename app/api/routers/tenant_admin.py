@@ -92,7 +92,18 @@ async def create_user(
 async def list_users(
     p: Principal = Depends(rate_limited()), c: Container = Depends(container)
 ) -> dict[str, Any]:
-    return {"items": [_user_out(u) for u in await c.rbac.list_users(p)]}
+    users, roles = await c.rbac.list_users_with_roles(p)
+    return {
+        "items": [
+            {
+                **_user_out(u),
+                "role_ids": roles.get(u.id, []),
+                "last_login_at": u.last_login_at,
+                "locked_until": u.locked_until,
+            }
+            for u in users
+        ]
+    }
 
 
 @router.patch("/users/{user_id}")

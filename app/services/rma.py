@@ -289,6 +289,22 @@ class RmaService:
             oi.qty_returned += ri.qty
         return {"restocked_lines": len(restock)}
 
+    async def list_rmas(
+        self, p: Principal, *, order_id: uuid.UUID | None, limit: int, offset: int
+    ) -> list[RmaRequest]:
+        """Newest first; RLS keeps the query inside the caller's tenant."""
+        p.require("rma", Action.read)
+        stmt = (
+            select(RmaRequest)
+            .order_by(RmaRequest.created_at.desc(), RmaRequest.id)
+            .limit(limit)
+            .offset(offset)
+        )
+        if order_id is not None:
+            stmt = stmt.where(RmaRequest.order_id == order_id)
+        async with self._tx(p) as s:
+            return list((await s.execute(stmt)).scalars().all())
+
     async def get(self, p: Principal, rma_id: uuid.UUID) -> dict[str, Any]:
         p.require("rma", Action.read)
         async with self._tx(p) as s:

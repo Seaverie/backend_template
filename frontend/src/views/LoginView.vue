@@ -9,7 +9,7 @@ import UiInput from '@/components/UiInput.vue'
 
 const route = useRoute()
 const router = useRouter()
-const platform = ref(false)
+const platform = ref(typeof route.query.next === 'string' && route.query.next.startsWith('/platform'))
 const tenant = ref(USE_MOCKS ? 'acme-store' : '')
 const email = ref(USE_MOCKS ? 'owner@acme.example.com' : '')
 const password = ref(USE_MOCKS ? 'demo-password' : '')
@@ -60,6 +60,7 @@ async function submit() {
         <UiInput v-if="platform" v-model="otp" label="Authenticator code" inputmode="numeric" autocomplete="one-time-code" placeholder="123456"
                  hint="6-digit code from your authenticator app (required once MFA is enrolled)" />
         <p v-if="error" class="error" role="alert">{{ error }}</p>
+        <p v-else-if="route.query.expired" class="demo-note" role="status">Your session ended. Sign in again to continue.</p>
         <UiButton type="submit" variant="primary" block :loading="busy">{{ busy ? 'Signing in…' : 'Sign in' }}</UiButton>
         <hr />
         <button type="button" class="switch" @click="platform = !platform; error = ''">
