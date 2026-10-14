@@ -92,6 +92,10 @@ A typical flow:
    * `POST /import/excel/{table}` with a CSV/XLSX file, then poll `GET /tasks/{id}`
    * `POST /notification-rules` and `POST /devices` for push notifications
 
+## Admin frontend
+
+`frontend/` contains a responsive Vue 3 admin console for this API (dashboard, orders, users and roles, webhooks, platform tenants). It runs on sample data out of the box; see [frontend/README.md](frontend/README.md).
+
 ## Development
 
 ```bash
