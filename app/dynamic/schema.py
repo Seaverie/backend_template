@@ -20,7 +20,7 @@ import sqlalchemy as sa
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.dialects.postgresql import JSONB, UUID
-from sqlalchemy.schema import CreateIndex, CreateTable
+from sqlalchemy.schema import CreateColumn, CreateIndex, CreateTable
 
 from app.models import DYNAMIC_SCHEMA, CrudMode, FieldType
 from app.security.identifiers import InvalidIdentifier, quote, validate_identifier
@@ -126,6 +126,43 @@ class TableSpec(BaseModel):
         names = [f.name for f in self.fields]
         if len(set(names)) != len(names):
             raise ValueError("field names must be unique")
+        return self
+
+
+class TablePatch(BaseModel):
+    """Additive/subtractive table changes. New fields must be nullable (existing rows have no value).
+    Index changes run with CREATE/DROP INDEX CONCURRENTLY outside the DDL transaction."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    label: str | None = Field(None, max_length=200)
+    crud_mode: CrudMode | None = None
+    require_idempotency: bool | None = None
+    add_fields: list[FieldSpec] = Field(default_factory=list, max_length=50)
+    drop_fields: list[str] = Field(default_factory=list, max_length=50)
+    add_indexes: list[str] = Field(default_factory=list, max_length=20)
+    drop_indexes: list[str] = Field(default_factory=list, max_length=20)
+
+    @field_validator("drop_fields", "add_indexes", "drop_indexes")
+    @classmethod
+    def _names(cls, v: list[str]) -> list[str]:
+        try:
+            out = [validate_identifier(x) for x in v]
+        except InvalidIdentifier as e:
+            raise ValueError(str(e)) from e
+        if len(set(out)) != len(out):
+            raise ValueError("names must be unique")
+        return out
+
+    @model_validator(mode="after")
+    def _rules(self) -> TablePatch:
+        if any(not f.nullable for f in self.add_fields):
+            raise ValueError("fields added to an existing table must be nullable")
+        added = {f.name for f in self.add_fields}
+        if added & set(self.drop_fields):
+            raise ValueError("a field cannot be added and dropped in the same change")
+        if set(self.add_indexes) & set(self.drop_indexes):
+            raise ValueError("an index cannot be added and dropped in the same change")
         return self
 
 
@@ -377,28 +414,108 @@ def _ref_stub(md: sa.MetaData, ref_table: str) -> None:
         )
 
 
-def create_table_statements(meta: TableMeta, app_role: str) -> list[str]:
+def qualified(physical: str) -> str:
+    return f"{quote(DYNAMIC_SCHEMA)}.{quote(physical)}"
+
+
+def field_index_name(physical: str, field: str) -> str:
+    return f"ix_{physical}_{field}"[:63]
+
+
+def search_index_name(physical: str) -> str:
+    return f"ix_{physical}_search"[:63]
+
+
+def _compile(ddl: Any) -> str:
+    return str(ddl.compile(dialect=_PG)).strip()
+
+
+def _table_for(meta: TableMeta) -> sa.Table:
     md = sa.MetaData()
     for f in meta.fields:
         if f.ref_table:
             _ref_stub(md, f.ref_table)
-    table = build_table(meta, md, with_ddl_objects=True)
-    stmts = [str(CreateTable(table).compile(dialect=_PG)).strip()]
+    return build_table(meta, md, with_ddl_objects=True)
+
+
+def create_table_statements(meta: TableMeta) -> list[str]:
+    """Role-independent DDL for a new table. Recorded verbatim in the migration ledger and replayed on
+    dedicated tenant databases; the GRANT to the runtime role is issued separately per database."""
+    table = _table_for(meta)
+    stmts = [_compile(CreateTable(table))]
+    stmts += [_compile(CreateIndex(ix)) for ix in sorted(table.indexes, key=lambda i: str(i.name))]
+    q = qualified(meta.physical_name)
     stmts += [
-        str(CreateIndex(ix).compile(dialect=_PG)).strip()
-        for ix in sorted(table.indexes, key=lambda i: str(i.name))
-    ]
-    qualified = f"{quote(DYNAMIC_SCHEMA)}.{quote(meta.physical_name)}"
-    role = quote(app_role)
-    stmts += [
-        f"ALTER TABLE {qualified} ENABLE ROW LEVEL SECURITY",
-        f"ALTER TABLE {qualified} FORCE ROW LEVEL SECURITY",
-        f"CREATE POLICY tenant_isolation ON {qualified} FOR ALL TO PUBLIC "
+        f"ALTER TABLE {q} ENABLE ROW LEVEL SECURITY",
+        f"ALTER TABLE {q} FORCE ROW LEVEL SECURITY",
+        f"CREATE POLICY tenant_isolation ON {q} FOR ALL TO PUBLIC "
         "USING (tenant_id = public.app_current_tenant_id()) "
         "WITH CHECK (tenant_id = public.app_current_tenant_id())",
-        f"GRANT SELECT, INSERT, UPDATE, DELETE ON {qualified} TO {role}",
     ]
     return stmts
+
+
+def grant_statement(physical: str, app_role: str) -> str:
+    return f"GRANT SELECT, INSERT, UPDATE, DELETE ON {qualified(physical)} TO {quote(app_role)}"
+
+
+def add_field_statements(meta_after: TableMeta, f: FieldMeta) -> list[str]:
+    """ALTER TABLE statements adding one field (column, enum CHECK, tenant-scoped UNIQUE / FK)."""
+    table = _table_for(meta_after)
+    pn, q = meta_after.physical_name, qualified(meta_after.physical_name)
+    stmts = [f"ALTER TABLE {q} ADD COLUMN {_compile(CreateColumn(table.c[f.name]))}"]
+    if f.type == FieldType.enum and f.enum_values:
+        check = (
+            sa.column(f.name)
+            .in_(list(f.enum_values))
+            .compile(dialect=_PG, compile_kwargs={"literal_binds": True})
+        )
+        stmts.append(f"ALTER TABLE {q} ADD CONSTRAINT {quote(f'ck_{pn}_{f.name}_enum'[:63])} CHECK ({check})")
+    if f.is_unique:
+        stmts.append(
+            f"ALTER TABLE {q} ADD CONSTRAINT {quote(f'uq_{pn}_{f.name}'[:63])} "
+            f"UNIQUE (tenant_id, {quote(f.name)})"
+        )
+    if f.type == FieldType.reference and f.ref_table:
+        stmts.append(
+            f"ALTER TABLE {q} ADD CONSTRAINT {quote(f'fk_{pn}_{f.name}'[:63])} "
+            f"FOREIGN KEY (tenant_id, {quote(f.name)}) "
+            f"REFERENCES {qualified(physical_name(f.ref_table))} (tenant_id, id) ON DELETE RESTRICT"
+        )
+    return stmts
+
+
+def drop_field_statement(meta: TableMeta, field: str) -> str:
+    return f"ALTER TABLE {qualified(meta.physical_name)} DROP COLUMN {quote(field)}"
+
+
+def drop_table_statement(meta: TableMeta) -> str:
+    return f"DROP TABLE {qualified(meta.physical_name)}"
+
+
+def create_field_index_concurrently(meta: TableMeta, field: str) -> str:
+    """Must run outside a transaction block."""
+    return (
+        f"CREATE INDEX CONCURRENTLY IF NOT EXISTS {quote(field_index_name(meta.physical_name, field))} "
+        f"ON {qualified(meta.physical_name)} (tenant_id, {quote(field)})"
+    )
+
+
+def drop_index_concurrently(physical: str, index_name: str) -> str:
+    return f"DROP INDEX CONCURRENTLY IF EXISTS {quote(DYNAMIC_SCHEMA)}.{quote(index_name)}"
+
+
+def create_search_index_concurrently(meta: TableMeta) -> str:
+    md = sa.MetaData()
+    table = build_table(meta, md)
+    ix = sa.Index(
+        search_index_name(meta.physical_name),
+        search_vector(table, meta.searchable),
+        postgresql_using="gin",
+        postgresql_concurrently=True,
+        _table=table,
+    )
+    return _compile(CreateIndex(ix, if_not_exists=True))
 
 
 def checksum(statements: list[str]) -> str:

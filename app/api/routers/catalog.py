@@ -141,7 +141,17 @@ def _variant(v: AppProductVariant) -> dict[str, Any]:
 
 def _product(p: AppProduct, variants: list[AppProductVariant]) -> dict[str, Any]:
     return {
-        **pick(p, "id", "name", "description", "status", "is_public", "created_at", "updated_at", metadata="metadata_"),
+        **pick(
+            p,
+            "id",
+            "name",
+            "description",
+            "status",
+            "is_public",
+            "created_at",
+            "updated_at",
+            metadata="metadata_",
+        ),
         "variants": [_variant(v) for v in variants],
     }
 
@@ -151,18 +161,30 @@ def _product(p: AppProduct, variants: list[AppProductVariant]) -> dict[str, Any]
 
 @router.post("/products", status_code=201)
 async def create_product(
-    body: ProductIn, request: Request, p: Principal = Depends(rate_limited()), c: Container = Depends(container)
+    body: ProductIn,
+    request: Request,
+    p: Principal = Depends(rate_limited()),
+    c: Container = Depends(container),
 ) -> dict[str, Any]:
     prod, vs = await c.inventory.create_product(
-        p, name=body.name, description=body.description, status=body.status, is_public=body.is_public,
-        metadata=body.metadata, variants=[v.model_dump() for v in body.variants], ctx=audit_ctx(request, p),
+        p,
+        name=body.name,
+        description=body.description,
+        status=body.status,
+        is_public=body.is_public,
+        metadata=body.metadata,
+        variants=[v.model_dump() for v in body.variants],
+        ctx=audit_ctx(request, p),
     )
     return _product(prod, vs)
 
 
 @router.patch("/products/{product_id}")
 async def patch_product(
-    product_id: uuid.UUID, body: ProductPatch, request: Request, p: Principal = Depends(rate_limited()),
+    product_id: uuid.UUID,
+    body: ProductPatch,
+    request: Request,
+    p: Principal = Depends(rate_limited()),
     c: Container = Depends(container),
 ) -> dict[str, Any]:
     changes = body.model_dump(exclude_unset=True)
@@ -174,7 +196,10 @@ async def patch_product(
 
 @router.post("/products/{product_id}/variants", status_code=201)
 async def add_variant(
-    product_id: uuid.UUID, body: VariantIn, request: Request, p: Principal = Depends(rate_limited()),
+    product_id: uuid.UUID,
+    body: VariantIn,
+    request: Request,
+    p: Principal = Depends(rate_limited()),
     c: Container = Depends(container),
 ) -> dict[str, Any]:
     return _variant(await c.inventory.add_variant(p, product_id, body.model_dump(), audit_ctx(request, p)))
@@ -195,7 +220,9 @@ def _metadata_filter(raw: str | None) -> dict[str, Any] | None:
 @router.get("/products")
 async def list_products(
     q: str | None = Query(None, min_length=1, max_length=200),
-    metadata: str | None = Query(None, description="JSON object matched by containment, e.g. {\"color\":\"red\"}"),
+    metadata: str | None = Query(
+        None, description='JSON object matched by containment, e.g. {"color":"red"}'
+    ),
     status: ProductStatus | None = None,
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0, le=10_000),
@@ -203,8 +230,14 @@ async def list_products(
     c: Container = Depends(container),
 ) -> dict[str, Any]:
     rows = await c.inventory.search_products(
-        p, p.tenant_id, q=q, metadata=_metadata_filter(metadata), status=status, public_only=False,
-        limit=limit, offset=offset,
+        p,
+        p.tenant_id,
+        q=q,
+        metadata=_metadata_filter(metadata),
+        status=status,
+        public_only=False,
+        limit=limit,
+        offset=offset,
     )
     return {"items": [_product(x, vs) for x, vs in rows]}
 
@@ -219,9 +252,12 @@ async def public_catalog(
     c: Container = Depends(container),
 ) -> dict[str, Any]:
     """Anonymous storefront view: active + public products, active variants, no internal fields."""
-    decision = await c.limiter.check([
-        Bucket("platform", c.settings.rl_platform_per_min), Bucket(f"catalog:ip:{client_ip(request)}", 120),
-    ])
+    decision = await c.limiter.check(
+        [
+            Bucket("platform", c.settings.rl_platform_per_min),
+            Bucket(f"catalog:ip:{client_ip(request)}", 120),
+        ]
+    )
     if not decision.allowed:
         raise RateLimited(headers={"Retry-After": str(decision.retry_after_s)})
     tenant = await c.tenants.get_by_slug(tenant_slug)
@@ -233,7 +269,9 @@ async def public_catalog(
     return {
         "items": [
             {
-                "id": str(x.id), "name": x.name, "description": x.description,
+                "id": str(x.id),
+                "name": x.name,
+                "description": x.description,
                 "variants": [pick(v, "sku", "name", "price", "currency", "attributes") for v in vs],
             }
             for x, vs in rows
@@ -246,15 +284,23 @@ async def public_catalog(
 
 @router.post("/warehouses", status_code=201)
 async def create_warehouse(
-    body: WarehouseIn, request: Request, p: Principal = Depends(rate_limited()), c: Container = Depends(container)
+    body: WarehouseIn,
+    request: Request,
+    p: Principal = Depends(rate_limited()),
+    c: Container = Depends(container),
 ) -> dict[str, Any]:
-    w = await c.inventory.create_warehouse(p, code=body.code, name=body.name, address=body.address, ctx=audit_ctx(request, p))
+    w = await c.inventory.create_warehouse(
+        p, code=body.code, name=body.name, address=body.address, ctx=audit_ctx(request, p)
+    )
     return pick(w, "id", "code", "name", "address")
 
 
 @router.post("/warehouses/{warehouse_id}/bins", status_code=201)
 async def create_bin(
-    warehouse_id: uuid.UUID, body: BinIn, request: Request, p: Principal = Depends(rate_limited()),
+    warehouse_id: uuid.UUID,
+    body: BinIn,
+    request: Request,
+    p: Principal = Depends(rate_limited()),
     c: Container = Depends(container),
 ) -> dict[str, Any]:
     b = await c.inventory.create_bin(p, warehouse_id, code=body.code, ctx=audit_ctx(request, p))
@@ -262,10 +308,15 @@ async def create_bin(
 
 
 @router.get("/warehouses")
-async def list_warehouses(p: Principal = Depends(rate_limited()), c: Container = Depends(container)) -> dict[str, Any]:
+async def list_warehouses(
+    p: Principal = Depends(rate_limited()), c: Container = Depends(container)
+) -> dict[str, Any]:
     return {
         "items": [
-            {**pick(w, "id", "code", "name", "address", "is_active"), "bins": [pick(b, "id", "code", "is_active") for b in bins]}
+            {
+                **pick(w, "id", "code", "name", "address", "is_active"),
+                "bins": [pick(b, "id", "code", "is_active") for b in bins],
+            }
             for w, bins in await c.inventory.list_warehouses(p)
         ]
     }
@@ -273,10 +324,16 @@ async def list_warehouses(p: Principal = Depends(rate_limited()), c: Container =
 
 @router.post("/stock/adjustments")
 async def adjust(
-    body: AdjustIn, request: Request, p: Principal = Depends(rate_limited("stock.write")), c: Container = Depends(container)
+    body: AdjustIn,
+    request: Request,
+    p: Principal = Depends(rate_limited("stock.write")),
+    c: Container = Depends(container),
 ) -> dict[str, Any]:
     replayed = await c.inventory.adjust(
-        p, batch_key=body.batch_key, lines=[(x.variant_id, x.bin_id, x.delta) for x in body.lines], note=body.note,
+        p,
+        batch_key=body.batch_key,
+        lines=[(x.variant_id, x.bin_id, x.delta) for x in body.lines],
+        note=body.note,
         ctx=audit_ctx(request, p),
     )
     return {"applied": not replayed, "replayed": replayed}
@@ -284,34 +341,67 @@ async def adjust(
 
 @router.post("/stock/transfers")
 async def transfer(
-    body: TransferIn, request: Request, p: Principal = Depends(rate_limited("stock.write")), c: Container = Depends(container)
+    body: TransferIn,
+    request: Request,
+    p: Principal = Depends(rate_limited("stock.write")),
+    c: Container = Depends(container),
 ) -> dict[str, Any]:
     replayed = await c.inventory.transfer(
-        p, batch_key=body.batch_key, variant_id=body.variant_id, from_bin=body.from_bin_id, to_bin=body.to_bin_id,
-        qty=body.qty, ctx=audit_ctx(request, p),
+        p,
+        batch_key=body.batch_key,
+        variant_id=body.variant_id,
+        from_bin=body.from_bin_id,
+        to_bin=body.to_bin_id,
+        qty=body.qty,
+        ctx=audit_ctx(request, p),
     )
     return {"applied": not replayed, "replayed": replayed}
 
 
 @router.get("/stock/levels")
 async def stock_levels(
-    variant_id: uuid.UUID | None = None, limit: int = Query(100, ge=1, le=500), offset: int = Query(0, ge=0, le=100_000),
-    p: Principal = Depends(rate_limited()), c: Container = Depends(container),
+    variant_id: uuid.UUID | None = None,
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0, le=100_000),
+    p: Principal = Depends(rate_limited()),
+    c: Container = Depends(container),
 ) -> dict[str, Any]:
     rows = await c.inventory.levels(p, variant_id=variant_id, limit=limit, offset=offset)
-    return {"items": [{**pick(b, "variant_id", "bin_id", "on_hand", "reserved"), "available": b.on_hand - b.reserved} for b in rows]}
+    return {
+        "items": [
+            {**pick(b, "variant_id", "bin_id", "on_hand", "reserved"), "available": b.on_hand - b.reserved}
+            for b in rows
+        ]
+    }
 
 
 @router.get("/stock/movements")
 async def stock_movements(
-    variant_id: uuid.UUID | None = None, limit: int = Query(100, ge=1, le=500), offset: int = Query(0, ge=0, le=100_000),
-    p: Principal = Depends(rate_limited()), c: Container = Depends(container),
+    variant_id: uuid.UUID | None = None,
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0, le=100_000),
+    p: Principal = Depends(rate_limited()),
+    c: Container = Depends(container),
 ) -> dict[str, Any]:
     rows = await c.inventory.movements(p, variant_id=variant_id, limit=limit, offset=offset)
     return {
         "items": [
-            pick(m, "id", "batch_key", "line_no", "variant_id", "bin_id", "kind", "delta_on_hand", "delta_reserved",
-                 "reference_type", "reference_id", "note", "created_by", "created_at")
+            pick(
+                m,
+                "id",
+                "batch_key",
+                "line_no",
+                "variant_id",
+                "bin_id",
+                "kind",
+                "delta_on_hand",
+                "delta_reserved",
+                "reference_type",
+                "reference_id",
+                "note",
+                "created_by",
+                "created_at",
+            )
             for m in rows
         ]
     }
@@ -321,9 +411,13 @@ async def stock_movements(
 
 
 def _po(po: Any, items: list[Any] | None = None) -> dict[str, Any]:
-    out = pick(po, "id", "number", "supplier_name", "warehouse_id", "status", "currency", "notes", "created_at")
+    out = pick(
+        po, "id", "number", "supplier_name", "warehouse_id", "status", "currency", "notes", "created_at"
+    )
     if items is not None:
-        out["items"] = [pick(i, "id", "variant_id", "qty_ordered", "qty_received", "unit_cost") for i in items]
+        out["items"] = [
+            pick(i, "id", "variant_id", "qty_ordered", "qty_received", "unit_cost") for i in items
+        ]
     return out
 
 
@@ -332,22 +426,32 @@ async def create_po(
     body: PoIn, request: Request, p: Principal = Depends(rate_limited()), c: Container = Depends(container)
 ) -> dict[str, Any]:
     po = await c.inventory.create_po(
-        p, supplier_name=body.supplier_name, warehouse_id=body.warehouse_id, currency=body.currency,
-        items=[(i.variant_id, i.qty, i.unit_cost) for i in body.items], notes=body.notes, ctx=audit_ctx(request, p),
+        p,
+        supplier_name=body.supplier_name,
+        warehouse_id=body.warehouse_id,
+        currency=body.currency,
+        items=[(i.variant_id, i.qty, i.unit_cost) for i in body.items],
+        notes=body.notes,
+        ctx=audit_ctx(request, p),
     )
     po, items = await c.inventory.get_po(p, po.id)
     return _po(po, items)
 
 
 @router.get("/purchase-orders/{po_id}")
-async def get_po(po_id: uuid.UUID, p: Principal = Depends(rate_limited()), c: Container = Depends(container)) -> dict[str, Any]:
+async def get_po(
+    po_id: uuid.UUID, p: Principal = Depends(rate_limited()), c: Container = Depends(container)
+) -> dict[str, Any]:
     po, items = await c.inventory.get_po(p, po_id)
     return _po(po, items)
 
 
 @router.post("/purchase-orders/{po_id}/status")
 async def po_status(
-    po_id: uuid.UUID, body: PoStatusIn, request: Request, p: Principal = Depends(rate_limited()),
+    po_id: uuid.UUID,
+    body: PoStatusIn,
+    request: Request,
+    p: Principal = Depends(rate_limited()),
     c: Container = Depends(container),
 ) -> dict[str, Any]:
     return _po(await c.inventory.set_po_status(p, po_id, body.status, audit_ctx(request, p)))
@@ -355,12 +459,18 @@ async def po_status(
 
 @router.post("/purchase-orders/{po_id}/receive")
 async def receive_po(
-    po_id: uuid.UUID, body: ReceiveIn, request: Request, p: Principal = Depends(rate_limited("stock.write")),
+    po_id: uuid.UUID,
+    body: ReceiveIn,
+    request: Request,
+    p: Principal = Depends(rate_limited("stock.write")),
     c: Container = Depends(container),
 ) -> dict[str, Any]:
     po, replayed = await c.inventory.receive_po(
-        p, po_id, batch_key=body.batch_key,
-        lines=[ReceiveLine(x.po_item_id, x.qty, x.bin_id) for x in body.lines], ctx=audit_ctx(request, p),
+        p,
+        po_id,
+        batch_key=body.batch_key,
+        lines=[ReceiveLine(x.po_item_id, x.qty, x.bin_id) for x in body.lines],
+        ctx=audit_ctx(request, p),
     )
     po, items = await c.inventory.get_po(p, po.id)
     return {**_po(po, items), "replayed": replayed}

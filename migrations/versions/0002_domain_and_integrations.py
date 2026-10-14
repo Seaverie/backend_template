@@ -6,17 +6,17 @@ Create Date: 2026-10-14 14:35:52.188307
 
 """
 import os
-from typing import Sequence, Union
+from collections.abc import Sequence
 
-from alembic import op
 import sqlalchemy as sa
+from alembic import op
 from sqlalchemy.dialects import postgresql
 
 # revision identifiers, used by Alembic.
 revision: str = '0002'
-down_revision: Union[str, Sequence[str], None] = '0001'
-branch_labels: Union[str, Sequence[str], None] = None
-depends_on: Union[str, Sequence[str], None] = None
+down_revision: str | Sequence[str] | None = '0001'
+branch_labels: str | Sequence[str] | None = None
+depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
@@ -631,7 +631,7 @@ def _security_upgrade() -> None:
 def _security_downgrade() -> None:
     # The owner is subject to FORCE RLS; lift it briefly to remove permissions the old constraint rejects.
     op.execute("ALTER TABLE app_permissions NO FORCE ROW LEVEL SECURITY")
-    op.execute(f"DELETE FROM app_permissions WHERE resource !~ '{OLD_RESOURCE_RE}'")
+    op.execute(f"DELETE FROM app_permissions WHERE resource !~ '{OLD_RESOURCE_RE}'")  # noqa: S608 - constant
     op.execute("ALTER TABLE app_permissions FORCE ROW LEVEL SECURITY")
     op.execute("ALTER TABLE app_permissions DROP CONSTRAINT ck_app_permissions_resource_format")
     op.execute(f"ALTER TABLE app_permissions ADD CONSTRAINT ck_app_permissions_resource_format CHECK (resource ~ '{OLD_RESOURCE_RE}')")

@@ -10,7 +10,13 @@ from typing import Any
 import httpx
 import pytest
 
-from app.integrations.http import OutboundBlocked, OutboundError, OutboundPolicy, SafeHttpClient, is_public_address
+from app.integrations.http import (
+    OutboundBlocked,
+    OutboundError,
+    OutboundPolicy,
+    SafeHttpClient,
+    is_public_address,
+)
 from app.integrations.payments import (
     StripeProvider,
     WebhookVerificationError,
@@ -76,12 +82,17 @@ async def test_vault_transit_provider() -> None:
         calls.append(req.url.path)
         assert req.headers["X-Vault-Token"] == "s.token"
         if req.url.path.endswith("/datakey/plaintext/tc"):
-            return httpx.Response(200, json={"data": {"plaintext": base64.b64encode(dek).decode(), "ciphertext": "vault:v1:abc"}})
+            return httpx.Response(
+                200,
+                json={"data": {"plaintext": base64.b64encode(dek).decode(), "ciphertext": "vault:v1:abc"}},
+            )
         assert json.loads(req.content) == {"ciphertext": "vault:v1:abc"}
         return httpx.Response(200, json={"data": {"plaintext": base64.b64encode(dek).decode()}})
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    e = Envelope(VaultTransitProvider("https://vault.internal:8200", "s.token", "tc", client=client), dek_cache_ttl_s=0)
+    e = Envelope(
+        VaultTransitProvider("https://vault.internal:8200", "s.token", "tc", client=client), dek_cache_ttl_s=0
+    )
     blob = await e.encrypt(b"hello", CTX)
     assert await e.decrypt(blob, CTX) == b"hello"
     assert calls == ["/v1/transit/datakey/plaintext/tc", "/v1/transit/decrypt/tc"]
@@ -134,10 +145,21 @@ def test_totp_rejects_replay_and_bad_input() -> None:
 @pytest.mark.parametrize(
     ("ip", "public"),
     [
-        ("8.8.8.8", True), ("2606:4700:4700::1111", True), ("127.0.0.1", False), ("10.1.2.3", False),
-        ("172.16.0.1", False), ("192.168.1.1", False), ("169.254.169.254", False), ("100.64.0.1", False),
-        ("0.0.0.0", False), ("::1", False), ("::ffff:10.0.0.1", False), ("fd00::1", False), ("fe80::1", False),
-        ("224.0.0.1", False), ("2002:0a00:0001::", False),
+        ("8.8.8.8", True),
+        ("2606:4700:4700::1111", True),
+        ("127.0.0.1", False),
+        ("10.1.2.3", False),
+        ("172.16.0.1", False),
+        ("192.168.1.1", False),
+        ("169.254.169.254", False),
+        ("100.64.0.1", False),
+        ("0.0.0.0", False),
+        ("::1", False),
+        ("::ffff:10.0.0.1", False),
+        ("fd00::1", False),
+        ("fe80::1", False),
+        ("224.0.0.1", False),
+        ("2002:0a00:0001::", False),
     ],
 )
 def test_public_address_classification(ip: str, public: bool) -> None:
@@ -158,8 +180,11 @@ async def test_outbound_policy_blocks_before_sending() -> None:
     sent: list[httpx.Request] = []
     c = _client(lambda r: sent.append(r) or httpx.Response(200), ["93.184.216.34"])
     for url in (
-        "http://api.example.com/x", "https://evil.example.com/x", "https://api.example.com:8443/x",
-        "https://user:pw@api.example.com/x", "https://169.254.169.254/latest/meta-data",
+        "http://api.example.com/x",
+        "https://evil.example.com/x",
+        "https://api.example.com:8443/x",
+        "https://user:pw@api.example.com/x",
+        "https://169.254.169.254/latest/meta-data",
     ):
         with pytest.raises(OutboundBlocked):
             await c.request("GET", url, policy=POLICY)
@@ -209,7 +234,11 @@ def test_webhook_signature() -> None:
     for bad_body, bad_hdr, secret in (
         (b'{"id":"evt_2"}', hdr, "whsec_test_secret"),  # tampered body
         (body, hdr, "whsec_other"),  # wrong secret
-        (body, sign_payload(body, "whsec_test_secret", ts=int(time.time()) - 3600), "whsec_test_secret"),  # stale
+        (
+            body,
+            sign_payload(body, "whsec_test_secret", ts=int(time.time()) - 3600),
+            "whsec_test_secret",
+        ),  # stale
         (body, None, "whsec_test_secret"),
         (body, "garbage", "whsec_test_secret"),
     ):
@@ -226,11 +255,15 @@ async def test_stripe_provider_request_shape() -> None:
 
     def handler(r: httpx.Request) -> httpx.Response:
         seen.append(r)
-        return httpx.Response(200, json={"id": "pi_123", "status": "requires_payment_method", "client_secret": "cs"})
+        return httpx.Response(
+            200, json={"id": "pi_123", "status": "requires_payment_method", "client_secret": "cs"}
+        )
 
     http = _client(handler, ["93.184.216.34"])
     sp = StripeProvider(http, {"api_key": "sk_test_abcdefghijkl", "webhook_secret": "whsec_abcdefghijkl"})
-    res = await sp.create_payment(amount=Decimal("10.50"), currency="USD", idempotency_key="k1", metadata={"order_id": "o"})
+    res = await sp.create_payment(
+        amount=Decimal("10.50"), currency="USD", idempotency_key="k1", metadata={"order_id": "o"}
+    )
     assert (res.provider_ref, res.status, res.client_secret) == ("pi_123", "pending", "cs")
     req = seen[0]
     assert req.headers["host"] == "api.stripe.com"
@@ -238,3 +271,42 @@ async def test_stripe_provider_request_shape() -> None:
     assert req.headers["authorization"] == "Bearer sk_test_abcdefghijkl"
     form = dict(x.split("=", 1) for x in req.content.decode().split("&"))
     assert form["amount"] == "1050" and form["currency"] == "usd"
+
+
+# -- dedicated database adapters ---------------------------------------------------------------------
+
+from app.db.adapters import ADAPTERS, ConnSpec, TargetNotAllowed, validate_target  # noqa: E402
+from app.models import DbDialect, DbSslMode  # noqa: E402
+
+
+def test_adapter_capabilities_never_assume_rls_outside_postgres() -> None:
+    assert ADAPTERS[DbDialect.postgresql].capabilities.supports_rls is True
+    assert ADAPTERS[DbDialect.mysql].capabilities.supports_rls is False
+    assert ADAPTERS[DbDialect.oracle].capabilities.supports_rls is False
+    assert not ADAPTERS[DbDialect.mysql].capabilities.supports_dynamic_crud
+
+
+def test_adapter_urls_and_tls() -> None:
+    spec = ConnSpec(
+        DbDialect.mysql, "db.internal", 3306, "shop", "app", "p@ss/word", DbSslMode.verify_full, None
+    )
+    url = ADAPTERS[DbDialect.mysql].url(spec)
+    assert url.drivername == "mysql+aiomysql" and url.password == "p@ss/word" and url.host == "db.internal"
+    assert ADAPTERS[DbDialect.mysql].connect_args(spec, 5)["ssl"].check_hostname is True
+    ora = ConnSpec(DbDialect.oracle, "ora.internal", 1521, "ORCLPDB1", "app", "x", DbSslMode.require, None)
+    assert ADAPTERS[DbDialect.oracle].url(ora).query["service_name"] == "ORCLPDB1"
+    assert ADAPTERS[DbDialect.oracle].connect_args(ora, 5)["protocol"] == "tcps"
+    pg = ConnSpec(DbDialect.postgresql, "pg", 5432, "d", "u", "p", DbSslMode.disable, None)
+    assert ADAPTERS[DbDialect.postgresql].connect_args(pg, 5)["ssl"] is False
+
+
+async def test_database_target_validation() -> None:
+    assert await validate_target("127.0.0.1", 5432, ["127.0.0.0/8"]) == ["127.0.0.1"]
+    for host, nets in (
+        ("127.0.0.1", []),
+        ("127.0.0.1", ["10.0.0.0/8"]),
+        ("169.254.169.254", ["0.0.0.0/0"]),
+        ("no-such-host.invalid", ["0.0.0.0/0"]),
+    ):
+        with pytest.raises(TargetNotAllowed):
+            await validate_target(host, 5432, nets)

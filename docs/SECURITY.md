@@ -90,10 +90,75 @@ The store does not provide exactly-once execution. It guarantees the following:
 
 If the response cannot be stored after the operation commits (Redis fails at that instant), the pending marker still blocks retries for 120 s. After that, a retry would execute again. Domain services in Phase 2 add database-level uniqueness on business keys (order numbers, payment intent IDs) for true deduplication.
 
-## Known limitations (Phase 1)
+## Inventory integrity
 
-* Platform admins have no MFA yet. Put platform endpoints behind a VPN or zero-trust proxy until Phase 2 adds TOTP/WebAuthn.
+* All quantity changes go through `app/services/ledger.py`. The steps are:
+  1. Take a transaction-scoped advisory lock on (tenant, `batch_key`).
+  2. Skip the batch if it already exists. An identical replay is a no-op; different content under the same key is rejected with 409.
+  3. Lock every affected `stock_balances` row `FOR UPDATE`, ordered by (variant_id, bin_id). The fixed order means concurrent batches can't deadlock.
+  4. Validate the new quantities.
+  5. Insert the movements and update the balances in the same transaction.
+* Checkout locks all balances of the ordered variants before allocating bins, so two checkouts can never pass a check against the same units.
+  * Removing the locks makes the concurrency tests fail; this was checked by mutation.
+* `stock_balances` has `CHECK (0 <= reserved <= on_hand)` as a last line of defence.
+* `stock_movements`, `order_status_history`, and `rma_events` are append-only:
+  * the runtime role has no UPDATE or DELETE on them;
+  * a trigger rejects UPDATE, DELETE, and TRUNCATE for every role.
+* Generic `/data/*` CRUD cannot reach any of these tables, because they are not registered dynamic tables.
+
+## Payments and provider credentials
+
+* Provider credentials are validated against per-provider formats. They are stored with envelope encryption only:
+  * a fresh DEK is sealed with AES-256-GCM;
+  * the DEK is wrapped by KMS, Vault, or the local KEK;
+  * the encryption context is (tenant, purpose, row id).
+* The Redis config cache holds the ciphertext, never plaintext. Decrypted DEKs are cached in-process for `TC_DEK_CACHE_TTL_S`.
+* Webhooks are authenticated only by an HMAC-SHA256 signature over the raw body, with a 300-second timestamp tolerance and constant-time comparison.
+  * Unverified requests change nothing.
+  * Verified events are deduplicated on (gateway, event id).
+  * Payment state only moves forward, and refund totals only increase (max semantics). Out-of-order webhooks and API responses therefore converge.
+* Provider calls happen outside database transactions, with provider idempotency keys derived from the client's `Idempotency-Key`. A retry after any partial failure reaches the same provider object, and local writes are upserts.
+  * Refunds are also recorded in `payment_refunds`, unique per (payment, key).
+* The sandbox provider is refused when `TC_ENVIRONMENT=production`.
+
+## Outbound requests (SSRF)
+
+`app/integrations/http.py` is the only outbound HTTP path for integrations. It enforces the following:
+
+* HTTPS only, port 443, no userinfo in the URL.
+* A host allowlist per provider. Tenants choose a provider; they never supply a URL.
+* Every DNS answer must be globally routable. Loopback, RFC 1918, link-local and metadata (169.254.169.254), CGNAT, multicast, reserved, and IPv4-mapped or 6to4-embedded private addresses are rejected.
+* The connection is pinned to the validated IP, with SNI and Host set to the original name, which closes the DNS-rebinding window.
+* No redirects, size-capped bodies, and no proxy settings taken from the environment.
+
+Dedicated tenant databases use a separate guard: host addresses must fall inside `TC_TENANT_DB_ALLOWED_NETWORKS`, and metadata and link-local ranges are always denied. The guard runs at configuration and again whenever an engine is built. Database drivers connect by hostname, so a DNS change between the check and the connect is possible; dedicated hosts are configured only by platform admins.
+
+## Dedicated databases
+
+* Configuration probes the connection. For PostgreSQL it refuses roles with `rolsuper` or `rolbypassrls`.
+* A database serves exactly one tenant: sync refuses a database that already contains another tenant's id.
+* The platform's DDL ledger is replayed in order. Each entry's checksum is verified, and the database records which entries it has applied. Statements are role-independent, and `GRANT` statements are not replayed.
+* RLS policies are identical to the shared tables, and the session sets the same transaction-scoped tenant context. Data-change audit rows are written to the dedicated database's own `system_audit_logs`.
+* A tenant whose database is behind the platform schema gets 503 on data endpoints until it is synced.
+* Switching a tenant to dedicated isolation is refused while it still has rows in the shared tables.
+* MySQL and Oracle have **no** RLS. Isolation there rests on the database being dedicated to one tenant. Data routing for those dialects returns 501 until it is implemented.
+* Credentials are rotated with `PUT /platform/tenants/{id}/database`, which increments the secret version. Each node rebuilds its pool on the next request after its 30-second config cache expires.
+
+## Platform administrators
+
+* TOTP (RFC 6238) is required when `TC_PLATFORM_MFA_REQUIRED` is set, which is the default in production.
+  * A token without MFA can only reach the enrollment endpoints.
+  * The TOTP secret is envelope-encrypted.
+  * The last accepted time step is stored, so a code cannot be replayed even inside its validity window.
+* Set `TC_ENABLE_PLATFORM_ROUTES=false` and leave `TC_DDL_DATABASE_URL` unset on request-serving deployments. They then expose no platform routes and hold no owner credential.
+
+## Known limitations (Phase 2)
+
 * JWTs use HS256 with symmetric keys. Move to EdDSA if third parties must verify tokens.
 * `last_used_at` on API keys is not yet updated, to avoid a write on every request.
-* Dynamic schema supports **create** only. PATCH, DELETE, snapshots, and `CREATE INDEX CONCURRENTLY` are Phase 2.
 * Rate-limit Lua scripts need every key on one Redis node. Use hash tags if you move to Redis Cluster.
+* Schema changes are fanned out to dedicated databases synchronously inside the platform DDL request. Phase 3 moves this to background workers.
+* Inventory, orders, payments and returns always live in the control-plane database, even for dedicated tenants. Only dynamic-table data (`/data/*`) is routed to dedicated databases in Phase 2.
+* Payment webhooks update payment and order amounts but do not move orders between statuses automatically. Tenants transition orders explicitly; notification rules are Phase 3.
+* Snapshot import is additive only. It never drops tables or fields, and it refuses to proceed if any field definition conflicts.
+* The local KMS provider exists for development. Production must use `vault` or `aws`; settings validation enforces this.

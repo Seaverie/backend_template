@@ -24,6 +24,7 @@ from app.services.ratelimit import RateLimiter
 from app.services.rbac import RbacService
 from app.services.rma import RmaService
 from app.services.schema import SchemaService
+from app.services.tenant_db import TenantDbService
 from app.services.tenants import TenantService
 
 
@@ -50,6 +51,7 @@ class Container:
     rma: RmaService
     analytics: AnalyticsService
     maps: MapService
+    tenant_db: TenantDbService
 
     @classmethod
     def build(cls, settings: Settings) -> Container:
@@ -87,9 +89,11 @@ class Container:
             rma=RmaService(db, payments),
             analytics=AnalyticsService(settings, db),
             maps=MapService(settings, cache, providers),
+            tenant_db=TenantDbService(settings, db, envelope, schema, tenants),
         )
 
     async def close(self) -> None:
+        await self.tenant_db.close()
         await self.http.close()
         await self.cache.close()
         await self.db.dispose()

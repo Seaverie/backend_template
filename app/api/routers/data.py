@@ -92,7 +92,7 @@ async def list_records(
 ) -> dict[str, Any]:
     meta, table, grant = await _resolve(c, table_name, p, Action.read)
     q = parse_list_query(list(request.query_params.multi_items()), meta, grant, c.settings)
-    async with c.db.tenant_session(p.tenant_id, user_id=p.user_id) as s:
+    async with c.tenant_db.session(p, dedicated=request.state.tenant_dedicated) as s:
         items, has_more = await crud.list_rows(s, table, meta, p, grant, q)
         if q.expand:
             await _expand(c, s, p, meta, items, q.expand)
@@ -119,7 +119,7 @@ async def get_record(
     if any(k not in ("fields", "expand") for k, _ in params):
         raise ValidationFailed("Only 'fields' and 'expand' are supported here.")
     q = parse_list_query(params, meta, grant, c.settings)
-    async with c.db.tenant_session(p.tenant_id, user_id=p.user_id) as s:
+    async with c.tenant_db.session(p, dedicated=request.state.tenant_dedicated) as s:
         item = await crud.get_row(s, table, meta, p, grant, record_id, q.fields)
         if q.expand:
             await _expand(c, s, p, meta, [item], q.expand)
@@ -138,7 +138,7 @@ async def create_record(
     async def handler() -> Response:
         values = validate_write(meta, grant, await _json_body(request), partial=False)
         read_grant = p.grant(meta.resource, Action.read)
-        async with c.db.tenant_session(p.tenant_id, user_id=p.user_id) as s:
+        async with c.tenant_db.session(p, dedicated=request.state.tenant_dedicated) as s:
             record_id, out = await crud.insert_row(s, table, meta, p, read_grant, values)
             await record(
                 s,
@@ -168,7 +168,7 @@ async def update_record(
     async def handler() -> Response:
         values = validate_write(meta, grant, await _json_body(request), partial=True)
         read_grant = p.grant(meta.resource, Action.read)
-        async with c.db.tenant_session(p.tenant_id, user_id=p.user_id) as s:
+        async with c.tenant_db.session(p, dedicated=request.state.tenant_dedicated) as s:
             out = await crud.update_row(s, table, meta, p, grant, read_grant, record_id, values)
             await record(
                 s,
@@ -194,7 +194,7 @@ async def delete_record(
     c: Container = Depends(container),
 ) -> Response:
     meta, table, grant = await _resolve(c, table_name, p, Action.delete)
-    async with c.db.tenant_session(p.tenant_id, user_id=p.user_id) as s:
+    async with c.tenant_db.session(p, dedicated=request.state.tenant_dedicated) as s:
         await crud.delete_row(s, table, p, grant, record_id)
         await record(
             s,

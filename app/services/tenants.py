@@ -11,7 +11,7 @@ from sqlalchemy import select
 from app.cache.redis import Cache, safe
 from app.core.config import Settings
 from app.db.session import Database
-from app.models import AppRole, AppTenant, AppUser, TenantStatus
+from app.models import AppRole, AppTenant, AppUser, IsolationMode, TenantStatus
 from app.security.passwords import hash_password, validate_password_policy
 from app.services.audit import AuditContext, record
 from app.services.orders import seed_default_statuses
@@ -23,6 +23,7 @@ class TenantInfo:
     slug: str
     status: TenantStatus
     rate_limit_per_min: int
+    isolation_mode: IsolationMode = IsolationMode.shared
 
     @property
     def active(self) -> bool:
@@ -41,7 +42,9 @@ class TenantService:
         return max(1, min(value, self._s.rl_tenant_max_per_min))
 
     def _info(self, t: AppTenant) -> TenantInfo:
-        return TenantInfo(t.id, t.slug, t.status, self.effective_rate_limit(t.rate_limit_per_min))
+        return TenantInfo(
+            t.id, t.slug, t.status, self.effective_rate_limit(t.rate_limit_per_min), t.isolation_mode
+        )
 
     async def get(self, tenant_id: uuid.UUID) -> TenantInfo | None:
         key = self._cache.keys.tenant(str(tenant_id))
@@ -52,6 +55,7 @@ class TenantService:
                 cached["slug"],
                 TenantStatus(cached["status"]),
                 self.effective_rate_limit(cached["rl"]),
+                IsolationMode(cached.get("iso", "shared")),
             )
         async with self._db.anonymous_session() as s:
             t = (await s.execute(select(AppTenant).where(AppTenant.id == tenant_id))).scalar_one_or_none()
@@ -64,6 +68,7 @@ class TenantService:
                 "slug": t.slug,
                 "status": t.status.value,
                 "rl": t.rate_limit_per_min,
+                "iso": t.isolation_mode.value,
             }
             await safe(self._cache.set_json(key, payload, self._s.tenant_cache_ttl_s), op="tenant.set")
         return info

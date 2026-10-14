@@ -204,3 +204,33 @@ async def test_api_key_lookup_policy_exposes_only_the_named_key(
         await s.execute(text("SELECT set_config('app.api_key_lookup', :k, true)"), {"k": ids[0]})
         visible = list((await s.execute(text("SELECT key_id FROM tenant_api_keys"))).scalars())
     assert visible == [ids[0]]
+
+
+async def test_tenant_database_registry_is_platform_writable_only(
+    container: Container, new_tenant: Callable[..., Awaitable[TenantCtx]]
+) -> None:
+    a = await new_tenant()
+    ta = uuid.UUID(a.id)
+    with pytest.raises(DBAPIError) as ei:
+        async with container.db.tenant_session(ta) as s:
+            await s.execute(
+                text(
+                    "INSERT INTO app_tenant_databases (tenant_id, dialect, host, port, database, username,"
+                    " password_enc, ssl_mode)"
+                    " VALUES (:t, 'postgresql', 'evil', 5432, 'd', 'u', 'x', 'disable')"
+                ),
+                {"t": ta},
+            )
+    assert "row-level security" in str(ei.value.orig).lower()
+
+
+async def test_gateway_lookup_policy_is_select_only(
+    container: Container, new_tenant: Callable[..., Awaitable[TenantCtx]]
+) -> None:
+    a = await new_tenant()
+    gid = uuid.uuid4()
+    async with container.db.anonymous_session() as s:
+        await s.execute(text("SELECT set_config('app.gateway_lookup', :g, true)"), {"g": str(gid)})
+        res = await s.execute(text("UPDATE app_payment_gateways SET is_active = false"))
+        assert res.rowcount == 0  # type: ignore[attr-defined]
+    assert a.id

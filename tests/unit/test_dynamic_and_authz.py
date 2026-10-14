@@ -82,7 +82,7 @@ def test_generated_ddl_has_rls_and_tenant_scoped_constraints() -> None:
         False,
         tuple(FieldMeta.from_spec(f) for f in spec.fields),
     )
-    sql = "\n".join(create_table_statements(meta, "tc_app"))
+    sql = "\n".join(create_table_statements(meta))
     assert "UNIQUE (tenant_id, code)" in sql  # uniqueness per tenant, not global
     assert "FOREIGN KEY(tenant_id, customer) REFERENCES tenant_data.dt_customers (tenant_id, id)" in sql
     assert "FORCE ROW LEVEL SECURITY" in sql

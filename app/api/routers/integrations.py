@@ -35,7 +35,17 @@ class SecretsIn(BaseModel):
 
 def _cfg(row: Any) -> dict[str, Any]:
     # Never includes secrets_enc.
-    return pick(row, "id", "name", "provider", "public_config", "is_default", "is_active", "secret_version", "created_at")
+    return pick(
+        row,
+        "id",
+        "name",
+        "provider",
+        "public_config",
+        "is_default",
+        "is_active",
+        "secret_version",
+        "created_at",
+    )
 
 
 def _kind(path_kind: str) -> Literal["payment", "map"]:
@@ -47,21 +57,35 @@ for _path in ("payment-gateways", "map-providers"):
     def _make(path_kind: str) -> None:
         @router.post(f"/{path_kind}", status_code=201, name=f"create_{path_kind}")
         async def create(
-            body: ProviderIn, request: Request, p: Principal = Depends(rate_limited()), c: Container = Depends(container)
+            body: ProviderIn,
+            request: Request,
+            p: Principal = Depends(rate_limited()),
+            c: Container = Depends(container),
         ) -> dict[str, Any]:
             row = await c.providers.create(
-                p, _kind(path_kind), name=body.name, provider=body.provider, secrets=body.secrets,
-                public_config=body.public_config, is_default=body.is_default, ctx=audit_ctx(request, p),
+                p,
+                _kind(path_kind),
+                name=body.name,
+                provider=body.provider,
+                secrets=body.secrets,
+                public_config=body.public_config,
+                is_default=body.is_default,
+                ctx=audit_ctx(request, p),
             )
             return _cfg(row)
 
         @router.get(f"/{path_kind}", name=f"list_{path_kind}")
-        async def list_(p: Principal = Depends(rate_limited()), c: Container = Depends(container)) -> dict[str, Any]:
+        async def list_(
+            p: Principal = Depends(rate_limited()), c: Container = Depends(container)
+        ) -> dict[str, Any]:
             return {"items": [_cfg(r) for r in await c.providers.list_configs(p, _kind(path_kind))]}
 
         @router.put(f"/{path_kind}/{{row_id}}/secrets", status_code=204, name=f"rotate_{path_kind}")
         async def rotate(
-            row_id: uuid.UUID, body: SecretsIn, request: Request, p: Principal = Depends(rate_limited()),
+            row_id: uuid.UUID,
+            body: SecretsIn,
+            request: Request,
+            p: Principal = Depends(rate_limited()),
             c: Container = Depends(container),
         ) -> None:
             await c.providers.rotate_secrets(p, _kind(path_kind), row_id, body.secrets, audit_ctx(request, p))
@@ -70,11 +94,16 @@ for _path in ("payment-gateways", "map-providers"):
 
 
 @router.post("/webhooks/payments/{gateway_id}")
-async def payment_webhook(gateway_id: uuid.UUID, request: Request, c: Container = Depends(container)) -> dict[str, Any]:
+async def payment_webhook(
+    gateway_id: uuid.UUID, request: Request, c: Container = Depends(container)
+) -> dict[str, Any]:
     """Provider callbacks. No bearer auth: the HMAC signature over the raw body is the authentication."""
     decision = await c.limiter.check(
-        [Bucket("platform", c.settings.rl_platform_per_min), Bucket(f"webhook:{gateway_id}", 600),
-         Bucket(f"webhook:ip:{client_ip(request)}", 1200)]
+        [
+            Bucket("platform", c.settings.rl_platform_per_min),
+            Bucket(f"webhook:{gateway_id}", 600),
+            Bucket(f"webhook:ip:{client_ip(request)}", 1200),
+        ]
     )
     if not decision.allowed:
         raise RateLimited(headers={"Retry-After": str(decision.retry_after_s)})

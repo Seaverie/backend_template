@@ -17,13 +17,15 @@ from app.api.deps import (
     platform_audit_ctx,
     platform_claims,
 )
+from app.api.serialize import pick
 from app.container import Container
 from app.core.errors import NotFound, ValidationFailed
 from app.core.logging import request_id_var
-from app.dynamic.schema import TableSpec
-from app.models import AppTenant, TenantStatus
+from app.dynamic.schema import TablePatch, TableSpec
+from app.models import AppTenant, DbDialect, DbSslMode, TenantStatus
 from app.security.tokens import TokenClaims
 from app.services.authz import PlatformPrincipal
+from app.services.tenant_db import DbConfigIn
 
 router = APIRouter(tags=["platform"])
 
@@ -190,3 +192,136 @@ async def list_tables(
             for t in tables
         ]
     }
+
+
+@router.patch("/system/tables/{table_id}")
+async def patch_table(
+    table_id: uuid.UUID,
+    patch: TablePatch,
+    request: Request,
+    dry_run: bool = Query(False),
+    admin: PlatformPrincipal = Depends(platform_admin),
+    c: Container = Depends(container),
+) -> dict[str, Any]:
+    return await c.schema.patch_table(
+        table_id, patch, admin_id=admin.admin_id, dry_run=dry_run, ctx=platform_audit_ctx(request, admin)
+    )
+
+
+@router.delete("/system/tables/{table_id}")
+async def delete_table(
+    table_id: uuid.UUID,
+    request: Request,
+    confirm: str = Query(..., max_length=63),
+    dry_run: bool = Query(False),
+    admin: PlatformPrincipal = Depends(platform_admin),
+    c: Container = Depends(container),
+) -> dict[str, Any]:
+    return await c.schema.delete_table(
+        table_id,
+        confirm=confirm,
+        admin_id=admin.admin_id,
+        dry_run=dry_run,
+        ctx=platform_audit_ctx(request, admin),
+    )
+
+
+@router.post("/system/snapshot/export")
+async def export_snapshot(
+    _: PlatformPrincipal = Depends(platform_admin), c: Container = Depends(container)
+) -> dict[str, Any]:
+    return await c.schema.export_snapshot()
+
+
+class SnapshotImportIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    snapshot: dict[str, Any]
+    dry_run: bool = True
+
+
+@router.post("/system/snapshot/import")
+async def import_snapshot(
+    body: SnapshotImportIn,
+    request: Request,
+    admin: PlatformPrincipal = Depends(platform_admin),
+    c: Container = Depends(container),
+) -> dict[str, Any]:
+    return await c.schema.import_snapshot(
+        body.snapshot, admin_id=admin.admin_id, dry_run=body.dry_run, ctx=platform_audit_ctx(request, admin)
+    )
+
+
+class TenantDbIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    dialect: DbDialect
+    host: str = Field(..., min_length=1, max_length=255, pattern=r"^[A-Za-z0-9.\-:]+$")
+    port: int = Field(..., ge=1, le=65535)
+    database: str = Field(..., pattern=r"^[A-Za-z0-9_\-.]{1,128}$")
+    username: str = Field(..., pattern=r"^[A-Za-z0-9_\-.@]{1,128}$")
+    password: str = Field(..., min_length=1, max_length=512)
+    ssl_mode: DbSslMode = DbSslMode.verify_full
+    ssl_root_cert: str | None = Field(None, max_length=20_000)
+    pool_size: int = Field(3, ge=1, le=20)
+
+
+def _db_out(row: Any) -> dict[str, Any]:
+    # Never includes the (encrypted) password.
+    return pick(
+        row,
+        "tenant_id",
+        "dialect",
+        "host",
+        "port",
+        "database",
+        "username",
+        "ssl_mode",
+        "status",
+        "secret_version",
+        "pool_size",
+        "synced_schema_version",
+        "last_verified_at",
+    )
+
+
+@router.put("/platform/tenants/{tenant_id}/database")
+async def configure_tenant_db(
+    tenant_id: uuid.UUID,
+    body: TenantDbIn,
+    request: Request,
+    admin: PlatformPrincipal = Depends(platform_admin),
+    c: Container = Depends(container),
+) -> dict[str, Any]:
+    """Create or update (including credential rotation) a tenant's dedicated database."""
+    cfg = DbConfigIn(**body.model_dump())
+    return _db_out(
+        await c.tenant_db.configure(admin.admin_id, tenant_id, cfg, platform_audit_ctx(request, admin))
+    )
+
+
+@router.get("/platform/tenants/{tenant_id}/database")
+async def get_tenant_db(
+    tenant_id: uuid.UUID,
+    admin: PlatformPrincipal = Depends(platform_admin),
+    c: Container = Depends(container),
+) -> dict[str, Any]:
+    return _db_out(await c.tenant_db.get(admin.admin_id, tenant_id))
+
+
+@router.post("/platform/tenants/{tenant_id}/database/sync")
+async def sync_tenant_db(
+    tenant_id: uuid.UUID,
+    request: Request,
+    admin: PlatformPrincipal = Depends(platform_admin),
+    c: Container = Depends(container),
+) -> dict[str, Any]:
+    return await c.tenant_db.sync(admin.admin_id, tenant_id, platform_audit_ctx(request, admin))
+
+
+@router.post("/platform/tenants/{tenant_id}/database/disable", status_code=204)
+async def disable_tenant_db(
+    tenant_id: uuid.UUID,
+    request: Request,
+    admin: PlatformPrincipal = Depends(platform_admin),
+    c: Container = Depends(container),
+) -> None:
+    await c.tenant_db.disable(admin.admin_id, tenant_id, platform_audit_ctx(request, admin))

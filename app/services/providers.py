@@ -78,7 +78,10 @@ class ProviderService:
                 pk = PaymentProviderKind(provider)
                 if pk == PaymentProviderKind.sandbox and not self._s.sandbox_payments:
                     raise ValidationFailed("The sandbox payment provider is disabled in this environment.")
-                return {PaymentProviderKind.stripe: STRIPE_SECRET_RULES, PaymentProviderKind.sandbox: SANDBOX_SECRET_RULES}[pk]
+                return {
+                    PaymentProviderKind.stripe: STRIPE_SECRET_RULES,
+                    PaymentProviderKind.sandbox: SANDBOX_SECRET_RULES,
+                }[pk]
             mk = MapProviderKind(provider)
         except ValueError as e:
             raise ValidationFailed("Unsupported provider.") from e

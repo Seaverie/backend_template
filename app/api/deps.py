@@ -14,6 +14,7 @@ from fastapi import Depends, Request
 from app.container import Container
 from app.core.errors import Forbidden, RateLimited, Unauthorized, ValidationFailed
 from app.core.logging import request_id_var, tenant_id_var
+from app.models import IsolationMode
 from app.security.tokens import TokenClaims
 from app.services.audit import AuditContext
 from app.services.authz import PlatformPrincipal, Principal
@@ -74,6 +75,7 @@ async def authenticate(request: Request, c: Container = Depends(container)) -> P
         raise Unauthorized()
     tenant_id_var.set(str(principal.tenant_id))
     request.state.tenant_rate_limit = tenant.rate_limit_per_min
+    request.state.tenant_dedicated = tenant.isolation_mode == IsolationMode.dedicated
     return principal
 
 
