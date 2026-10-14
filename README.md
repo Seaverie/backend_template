@@ -60,10 +60,15 @@ A multi-tenant FastAPI backend built on Python 3.11+, SQLAlchemy 2.0 (async), an
 ## Quick start
 
 ```bash
-cp .env.example .env          # replace every CHANGE_ME
-docker compose up --build     # postgres, redis, migrations, api, worker, beat, otel-collector, jaeger
-docker compose exec api python -m app.cli create-platform-admin --email ops@example.com
+cp .env.example .env          # replace every CHANGE_ME, including TC_SEED_ADMIN_PASSWORD
+docker compose up --build     # postgres, redis, migrations + admin seed, api, worker, beat, otel-collector, jaeger
 ```
+
+The platform admin ("super admin") is created on startup from `TC_SEED_ADMIN_EMAIL` and
+`TC_SEED_ADMIN_PASSWORD` in `.env`; sign in with those in the web console under "Platform
+administrator?". The seed only ever creates a missing admin: it never changes an existing one's
+password, and it is skipped when the variables are unset. Add more admins with
+`docker compose exec api python -m app.cli create-platform-admin --email ops@example.com`.
 
 The API is served at `http://localhost:8000/api/v1`. OpenAPI docs are at `/api/v1/docs` outside production. Change the prefix with `TC_API_PREFIX`. Traces appear in Jaeger at `http://localhost:16686`.
 
