@@ -1,0 +1,114 @@
+# Every value can be set with the TC_* environment variable shown. See .env.example.
+server:
+  port: ${PORT:8000}
+  forward-headers-strategy: framework   # trust X-Forwarded-* from the reverse proxy / Cloudflare Tunnel
+  shutdown: graceful
+  error:
+    whitelabel:
+      enabled: false
+
+spring:
+  application:
+    name: tenantcore
+  threads:
+    virtual:
+      enabled: true
+  main:
+    banner-mode: off
+  jackson:
+    property-naming-strategy: SNAKE_CASE
+    default-property-inclusion: always
+    deserialization:
+      fail-on-unknown-properties: true
+      use-big-decimal-for-floats: true   # keep decimals exact (prices, custom number fields)
+    serialization:
+      write-dates-as-timestamps: false
+  flyway:
+    enabled: false          # run explicitly with the owner role, see DataConfig
+  data:
+    redis:
+      url: ${TC_REDIS_URL:redis://localhost:6379/0}
+  servlet:
+    multipart:
+      max-file-size: ${TC_MULTIPART_MAX_MB:100}MB
+      max-request-size: ${TC_MULTIPART_MAX_MB:100}MB
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health
+  endpoint:
+    health:
+      probes:
+        enabled: true
+
+tc:
+  environment: ${TC_ENVIRONMENT:dev}
+  api-prefix: /api/v1
+  db:
+    url: ${TC_DB_URL:jdbc:postgresql://localhost:5432/tenantcore}
+    app-user: ${TC_DB_APP_USER:tc_app}
+    app-password: ${TC_DB_APP_PASSWORD:}
+    owner-user: ${TC_DB_OWNER_USER:tc_owner}
+    owner-password: ${TC_DB_OWNER_PASSWORD:}
+    pool-size: ${TC_DB_POOL_SIZE:10}
+    statement-timeout-ms: ${TC_DB_STATEMENT_TIMEOUT_MS:5000}
+  jwt:
+    # JSON object {kid: secret}; each secret >= 32 bytes. Keep the old kid listed while rotating.
+    keys: ${TC_JWT_KEYS:}
+    active-kid: ${TC_JWT_ACTIVE_KID:}
+    issuer: ${TC_JWT_ISSUER:tenantcore}
+    access-ttl-seconds: ${TC_ACCESS_TTL_S:600}
+    refresh-ttl-seconds: ${TC_REFRESH_TTL_S:1209600}
+    platform-ttl-seconds: ${TC_PLATFORM_TTL_S:3600}
+  # base64 of 32 random bytes; encrypts secrets at rest (MFA secrets, provider credentials).
+  encryption-key: ${TC_ENCRYPTION_KEY:}
+  platform-mfa-required: ${TC_PLATFORM_MFA_REQUIRED:}
+  seed:
+    admin-email: ${TC_SEED_ADMIN_EMAIL:}
+    admin-password: ${TC_SEED_ADMIN_PASSWORD:}
+  rate-limit:
+    login-per-min: ${TC_RL_LOGIN_PER_MIN:10}
+    principal-per-min: ${TC_RL_PRINCIPAL_PER_MIN:300}
+    tenant-default-per-min: ${TC_RL_TENANT_DEFAULT_PER_MIN:1200}
+    tenant-max-per-min: ${TC_RL_TENANT_MAX_PER_MIN:12000}
+  # Browser origins allowed to call the API directly (the dashboard normally uses the same origin).
+  cors-origins: ${TC_CORS_ORIGINS:}
+  # Dashboard address used in email links until it is set in the platform settings.
+  public-url: ${TC_PUBLIC_URL:http://localhost:5173}
+  # Where uploaded files go when the storage driver is "local" (a Docker volume in docker-compose).
+  storage-dir: ${TC_STORAGE_DIR:./storage}
+  files:
+    max-file-mb: ${TC_FILE_MAX_MB:20}
+    default-quota-mb: ${TC_FILE_QUOTA_MB:1024}
+    link-ttl-seconds: ${TC_FILE_LINK_TTL_S:3600}
+  email:
+    poll-ms: ${TC_EMAIL_POLL_MS:5000}
+    max-attempts: ${TC_EMAIL_MAX_ATTEMPTS:8}
+    worker-enabled: ${TC_EMAIL_WORKER_ENABLED:true}
+  payments:
+    stripe-api-base: ${TC_STRIPE_API_BASE:https://api.stripe.com}
+    webhook-tolerance-seconds: ${TC_WEBHOOK_TOLERANCE_S:300}
+  imports:
+    poll-ms: ${TC_IMPORT_POLL_MS:2000}
+  jobs:
+    poll-ms: ${TC_JOBS_POLL_MS:1000}
+    worker-enabled: ${TC_JOBS_WORKER_ENABLED:true}
+  webhooks:
+    # Only for local development: lets webhooks call localhost and private network addresses.
+    allow-private-targets: ${TC_WEBHOOKS_ALLOW_PRIVATE:false}
+    timeout-seconds: ${TC_WEBHOOKS_TIMEOUT_S:10}
+  push:
+    fcm-base-url: ${TC_FCM_BASE_URL:https://fcm.googleapis.com}
+    google-token-url: ${TC_GOOGLE_TOKEN_URL:https://oauth2.googleapis.com/token}
+  maps:
+    nominatim-url: ${TC_NOMINATIM_URL:https://nominatim.openstreetmap.org}
+    google-url: ${TC_GOOGLE_MAPS_URL:https://maps.googleapis.com}
+    cache-days: ${TC_GEOCODE_CACHE_DAYS:30}
+    provider-calls-per-min: ${TC_MAPS_CALLS_PER_MIN:60}
+  deliveries:
+    ping-retention-days: ${TC_PING_RETENTION_DAYS:30}
+  backups:
+    dir: ${TC_BACKUP_DIR:/app/backups}
+    interval-hours: ${TC_BACKUP_INTERVAL_HOURS:24}

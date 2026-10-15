@@ -1,0 +1,11 @@
+.git
+.gradle
+.kotlin
+build
+web/node_modules
+web/dist
+web/e2e/screens
+.env
+backups
+storage
+dump.rdb

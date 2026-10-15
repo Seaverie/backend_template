@@ -1,0 +1,15 @@
+.gradle/
+build/
+out/
+.idea/
+*.iml
+.env
+.env.local
+*.log
+dump.rdb
+storage/
+web/node_modules/
+web/dist/
+web/e2e/screens/
+.kotlin/
+backups/

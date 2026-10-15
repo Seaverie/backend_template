@@ -1,0 +1,4 @@
+node_modules
+dist
+e2e/screens
+e2e/.out
